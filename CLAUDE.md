@@ -124,7 +124,15 @@ Forrás lehet:
    érvényes címkézés; a találat résztvevőiből indítható beszélgetésnézet; ügyenkénti
    mentés, betöltés és törlés. A címkék és keresések
    kizárólag az ügy SQLite-adatbázisában tárolódnak.
-7. Exportok, PyInstaller build, README (magyar és angol).
+7. [x] Exportok és csomagolás: részletes keresési találatok CSV-be (Excel-kompatibilis,
+   képletbiztonságos UTF-8 BOM-mal) és eredeti levelek EML ZIP-be SHA-256 jegyzékkel;
+   keresési jelentés nyomtatása/PDF-be mentése a böngészőből. A teljes EML-export
+   forrás-hash ellenőrzéssel működik, méret- és találati korlátokkal. Elkészült a
+   Python 3.13 x64 / Windows onedir PyInstaller build, a fejlesztői és build
+   követelményfájl, a `run_dev.bat`, a `build_windows.bat`, a `0.1.0` verziómetaadat,
+   a changelog és az angol/magyar README. A PDF-jelentés legfeljebb 2000 találatot
+   tartalmaz; a kitalált adatokkal készült keresési képernyőkép megtalálható a
+   `docs/screenshots/` mappában. A projektlicenc kiválasztása a kiadás előtt pótlandó.
 8. Felkészítés a GitHubra (lásd lent), első kiadás.
 
 ## Felkészítés a GitHubra

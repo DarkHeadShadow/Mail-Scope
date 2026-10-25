@@ -6,6 +6,7 @@ import argparse
 import logging
 
 from .app import create_server
+from version import __version__
 
 
 def main() -> None:
@@ -15,7 +16,10 @@ def main() -> None:
     arguments = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     http_server = create_server(port=arguments.port)
-    print(f"Mail-Scope is ready: http://127.0.0.1:{arguments.port}")
+    print(
+        f"Mail-Scope {__version__} is ready: "
+        f"http://127.0.0.1:{arguments.port}"
+    )
     try:
         http_server.serve_forever()
     except KeyboardInterrupt:

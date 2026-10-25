@@ -361,9 +361,119 @@ async function updateSelectedLabels(enabled) {
 }
 
 /**
+ * Download a CSV or hash-manifested EML ZIP for the active detailed search.
+ */
+async function exportDetailedSearch(format) {
+  try {
+    const response = await fetch("/api/search/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...collectDetailedSearch(), format }),
+    });
+    if (!response.ok) {
+      const payload = await response.json();
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1]
+      || (format === "csv" ? "Mail-Scope-search.csv" : "Mail-Scope-search.eml.zip");
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const download = document.createElement("a");
+    download.href = objectUrl;
+    download.download = filename;
+    download.click();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    element("detailed-search-notice").textContent = `Export elkészült: ${filename}`;
+    element("detailed-search-notice").classList.remove("error");
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+}
+
+/**
+ * Prepare a complete, bounded search report for the browser's print-to-PDF dialog.
+ */
+async function printDetailedSearchReport() {
+  const query = collectDetailedSearch();
+  const report = element("search-print-report");
+  const reportRows = [];
+  try {
+    const firstPage = await requestJson("/api/search", {
+      method: "POST",
+      body: JSON.stringify({ ...query, limit: 200, offset: 0 }),
+    });
+    if (firstPage.total > 2000) {
+      throw new Error("A PDF-jelentés legfeljebb 2000 találatot tartalmazhat; szűkítse a keresést.");
+    }
+    reportRows.push(...firstPage.results);
+    for (let offset = firstPage.results.length; offset < firstPage.total; offset += 200) {
+      const page = await requestJson("/api/search", {
+        method: "POST",
+        body: JSON.stringify({ ...query, limit: 200, offset }),
+      });
+      reportRows.push(...page.results);
+    }
+
+    report.replaceChildren();
+    const title = document.createElement("h1");
+    title.textContent = "Mail-Scope · részletes keresési jelentés";
+    const creator = document.createElement("p");
+    creator.textContent = `Készítette: Bálint Szabolcs · Készült: ${new Date().toLocaleString("hu-HU")}`;
+    const summary = document.createElement("p");
+    const criteria = query.groups
+      .map((group) => group.conditions
+        .map((condition) => `${condition.field}: ${condition.value}`)
+        .join(` ${group.operator} `))
+      .join(` ${query.operator} `);
+    summary.textContent =
+      `Találatok: ${firstPage.total.toLocaleString("hu-HU")} · Feltétel: ${criteria}`;
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headerRow = document.createElement("tr");
+    ["Dátum", "Tárgy", "Feladó", "Forrás", "Mappa", "Címkék"].forEach((heading) => {
+      const cell = document.createElement("th");
+      cell.textContent = heading;
+      headerRow.append(cell);
+    });
+    head.append(headerRow);
+    const body = document.createElement("tbody");
+    reportRows.forEach((message) => {
+      const row = document.createElement("tr");
+      [
+        message.sent_date || "",
+        message.subject || "(nincs tárgy)",
+        message.sender || "",
+        message.source_path || "",
+        [message.folder_path, message.folder_name].filter(Boolean).join("/"),
+        message.labels || "",
+      ].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = String(value);
+        row.append(cell);
+      });
+      body.append(row);
+    });
+    table.append(head, body);
+    report.append(title, creator, summary, table);
+    report.setAttribute("aria-hidden", "false");
+    document.body.classList.add("printing-search-report");
+    window.addEventListener("afterprint", () => {
+      document.body.classList.remove("printing-search-report");
+      report.setAttribute("aria-hidden", "true");
+    }, { once: true });
+    window.print();
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+}
+
+/**
  * Update source lists, case identity, and active indexing progress.
  */
 function renderStatus(status) {
+  if (status.version) element("app-version").textContent = status.version;
   element("case-label").textContent = status.case
     ? `${status.case.name} · ${status.case.path}`
     : "Nincs megnyitott ügy";
@@ -1195,6 +1305,9 @@ element("previous-search-page").addEventListener("click", () => {
 element("next-search-page").addEventListener("click", () => {
   runDetailedSearch(state.detailedOffset + 50);
 });
+element("export-search-csv-button").addEventListener("click", () => exportDetailedSearch("csv"));
+element("export-search-eml-button").addEventListener("click", () => exportDetailedSearch("eml_zip"));
+element("export-search-pdf-button").addEventListener("click", printDetailedSearchReport);
 
 /**
  * Load the case currently selected when the local page opens.

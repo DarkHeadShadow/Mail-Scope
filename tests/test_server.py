@@ -531,6 +531,89 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post("/api/search", {"conditions": [], "operator": "AND"})[0], 400)
 
+    def test_detailed_search_exports_csv_and_verified_eml_zip(self) -> None:
+        """Export detailed-search metadata and originals without changing sources."""
+        self.application.select_case(str(self.case_directory))
+        self.source_path.write_bytes(
+            _fixture_mail(
+                subject="=SUM(1,1)",
+                message_id="<csv-formula@example.test>",
+            )
+        )
+        source = self.application.discover(str(self.source_path))[0]
+        self.application.start_index([source["path"]])
+        assert self.application.job is not None
+        self.assertTrue(self.application.job.wait(5))
+        query = ({"field": "subject", "value": "=SUM(1,1)"},)
+
+        original_hash = hashlib.sha256(self.source_path.read_bytes()).hexdigest()
+        csv_bytes, csv_type, csv_name = self.application.detailed_search_export(
+            query,
+            operator="AND",
+            export_format="csv",
+        )
+        self.assertEqual(csv_type, "text/csv; charset=utf-8")
+        self.assertEqual(csv_name, "Mail-Scope-search.csv")
+        self.assertTrue(csv_bytes.startswith(b"\xef\xbb\xbf"))
+        csv_text = csv_bytes.decode("utf-8-sig")
+        self.assertIn("subject,sent_date,sender,participants,source,folder,message_id,sha256,labels,copy_count", csv_text)
+        self.assertIn("'=SUM(1,1)", csv_text)
+
+        zip_bytes, zip_type, zip_name = self.application.detailed_search_export(
+            query,
+            operator="AND",
+            export_format="eml_zip",
+        )
+        self.assertEqual(zip_type, "application/zip")
+        self.assertEqual(zip_name, "Mail-Scope-search.eml.zip")
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
+            names = archive.namelist()
+            self.assertEqual(len(names), 2)
+            eml_name = next(name for name in names if name.endswith(".eml"))
+            raw_message = archive.read(eml_name)
+            manifest = archive.read("SHA256SUMS.txt").decode("utf-8")
+            self.assertIn(hashlib.sha256(raw_message).hexdigest(), manifest)
+            self.assertIn(eml_name, manifest)
+            self.assertIn(b"Message-ID: <csv-formula@example.test>", raw_message)
+
+        self.assertEqual(
+            hashlib.sha256(self.source_path.read_bytes()).hexdigest(),
+            original_hash,
+        )
+
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", int(http_server.server_address[1]), timeout=3
+        )
+        self.addCleanup(connection.close)
+        for export_format, expected_type in (
+            ("csv", "text/csv; charset=utf-8"),
+            ("eml_zip", "application/zip"),
+        ):
+            connection.request(
+                "POST",
+                "/api/search/export",
+                body=json.dumps(
+                    {
+                        "conditions": list(query),
+                        "operator": "AND",
+                        "format": export_format,
+                    }
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            exported_data = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), expected_type)
+            self.assertGreater(len(exported_data), 0)
+            self.assertIn("attachment;", response.getheader("Content-Disposition"))
+
 
 if __name__ == "__main__":
     unittest.main()

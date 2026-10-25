@@ -211,6 +211,7 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .detailed-result-open span { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .detailed-result-labels { color: #9bd7aa; font-size: 9px; overflow-wrap: anywhere; }
 .detailed-pagination { justify-content: flex-end; margin-top: 10px; }
+.search-print-report { display: none; }
 .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .conversation-controls { margin-top: 16px; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: #0e1412; }
 .person-selector { margin: 0; padding: 0; border: 0; }
@@ -270,4 +271,14 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; }
   .timeline { max-height: none; overflow: visible; }
   .timeline-card { max-width: 100%; break-inside: avoid; border-color: #bbb; background: #fff; }
   .timeline-card .message-subject { color: #111; }
+  body.printing-search-report .sidebar,
+  body.printing-search-report .main-area > *:not(#search-print-report) { display: none !important; }
+  body.printing-search-report .main-area { max-width: none; margin: 0; padding: 0; }
+  body.printing-search-report #search-print-report { display: block !important; color: #111; }
+  body.printing-search-report #search-print-report h1 { margin-bottom: 8px; font-size: 18px; }
+  body.printing-search-report #search-print-report p { margin-bottom: 6px; font-size: 10px; }
+  body.printing-search-report #search-print-report table { width: 100%; border-collapse: collapse; font-size: 8px; }
+  body.printing-search-report #search-print-report th,
+  body.printing-search-report #search-print-report td { padding: 4px; border: 1px solid #999; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  body.printing-search-report #search-print-report th { background: #e6eee8; }
 }

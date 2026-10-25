@@ -3,7 +3,9 @@
 __author__ = "Bálint Szabolcs"
 
 import calendar
+import csv
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -28,6 +30,7 @@ from sources.models import MessageLocator
 from sources.content import message_body_text
 from sources.discover import DiscoveredSource, discover_sources, sha256_file
 from sources.reader_factory import open_source
+from version import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -124,7 +127,13 @@ class MailScopeApplication:
         """Return case, source, message-count, and job progress information."""
         with self._lock:
             if self.database is None or self.case_directory is None:
-                return {"case": None, "sources": [], "message_count": 0, "job": None}
+                return {
+                    "version": __version__,
+                    "case": None,
+                    "sources": [],
+                    "message_count": 0,
+                    "job": None,
+                }
             job_data: dict[str, Any] | None = None
             if self.job is not None:
                 progress = self.job.progress
@@ -140,6 +149,7 @@ class MailScopeApplication:
                     except RuntimeError as error:
                         job_data["error"] = str(error.__cause__ or error)
             return {
+                "version": __version__,
                 "case": {"path": str(self.case_directory), "name": self.case_directory.name},
                 "sources": [_row_json(row) for row in self.database.sources()],
                 "message_count": self.database.message_count(),
@@ -214,6 +224,104 @@ class MailScopeApplication:
                 "limit": limit,
                 "offset": offset,
             }
+
+    def detailed_search_export(
+        self,
+        conditions: tuple[dict[str, Any], ...],
+        *,
+        operator: str,
+        export_format: str,
+    ) -> tuple[bytes, str, str]:
+        """Export bounded detailed-search hits as CSV or verified original EML files."""
+        if export_format not in {"csv", "eml_zip"}:
+            raise ValueError("Az exportformátum CSV vagy EML ZIP legyen.")
+        with self._lock:
+            database = self._require_case()
+            rows, total = database.detailed_search(
+                conditions,
+                operator=operator,
+                limit=10001 if export_format == "csv" else 501,
+            )
+            maximum = 10000 if export_format == "csv" else 500
+            if total > maximum:
+                raise ApiError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    f"Ez az export legfeljebb {maximum} találatot tartalmazhat; szűkítse a keresést.",
+                )
+            if export_format == "csv":
+                output = io.StringIO(newline="")
+                writer = csv.writer(output)
+                writer.writerow(
+                    (
+                        "subject",
+                        "sent_date",
+                        "sender",
+                        "participants",
+                        "source",
+                        "folder",
+                        "message_id",
+                        "sha256",
+                        "labels",
+                        "copy_count",
+                    )
+                )
+                for row in rows:
+                    writer.writerow(
+                        (
+                            _csv_safe(row["subject"]),
+                            _csv_safe(row["sent_date"]),
+                            _csv_safe(row["sender"]),
+                            _csv_safe(row["participant_addresses"]),
+                            _csv_safe(row["source_path"]),
+                            _csv_safe(
+                                "/".join(
+                                    value
+                                    for value in (
+                                        row["folder_path"],
+                                        row["folder_name"],
+                                    )
+                                    if value
+                                )
+                            ),
+                            _csv_safe(row["internet_message_id"]),
+                            _csv_safe(row["content_hash"]),
+                            _csv_safe(row["labels"]),
+                            row["copy_count"],
+                        )
+                    )
+                return (
+                    output.getvalue().encode("utf-8-sig"),
+                    "text/csv; charset=utf-8",
+                    "Mail-Scope-search.csv",
+                )
+
+            archive = BytesIO()
+            hashes: list[str] = []
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+                total_raw_bytes = 0
+                for index, row in enumerate(rows, start=1):
+                    opened = self.open_message(int(row["message_id"]), include_raw=True)
+                    raw = opened["raw_eml"]
+                    total_raw_bytes += len(raw)
+                    if total_raw_bytes > 256 * 1024 * 1024:
+                        raise ApiError(
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                            "Az EML ZIP-export legfeljebb 256 MiB forráslevelet tartalmazhat.",
+                        )
+                    filename = _safe_eml_filename(
+                        index, str(row["subject"] or "level")
+                    )
+                    output.writestr(filename, raw)
+                    hashes.append(f"{hashlib.sha256(raw).hexdigest()}  {filename}")
+                output.writestr(
+                    "SHA256SUMS.txt",
+                    ("SHA-256:\n" + "\n".join(hashes) + "\n").encode("utf-8"),
+                )
+            return (
+                archive.getvalue(),
+                "application/zip",
+                "Mail-Scope-search.eml.zip",
+            )
 
     def saved_searches(self) -> list[dict[str, Any]]:
         """Return named searches with their validated, decoded condition groups."""
@@ -653,6 +761,27 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.create_person(
                     display_name, tuple(addresses)
                 )
+            elif path == "/api/search/export":
+                conditions, operator = self._search_conditions(payload)
+                data, content_type, filename = (
+                    self.server.application.detailed_search_export(
+                        conditions,
+                        operator=operator,
+                        export_format=_required_string(payload, "format"),
+                    )
+                )
+                self.send_response(HTTPStatus.OK.value)
+                self.send_header("Content-Type", content_type)
+                self.send_header(
+                    "Content-Disposition",
+                    f'attachment; filename="{filename}"',
+                )
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(data)
+                return
             elif path == "/api/search":
                 conditions, operator = self._search_conditions(payload)
                 limit = _payload_integer(payload, "limit", 100, maximum=200)
@@ -939,6 +1068,14 @@ def _source_json(source: DiscoveredSource) -> dict[str, Any]:
 def _row_json(row: sqlite3.Row) -> dict[str, Any]:
     """Convert a database row to JSON-friendly Python values."""
     return {key: row[key] for key in row.keys()}
+
+
+def _csv_safe(value: Any) -> str:
+    """Neutralize spreadsheet formula prefixes in untrusted exported text."""
+    text = "" if value is None else str(value)
+    if text.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
 
 
 def _message_headers(message: EmailMessage) -> dict[str, str]:

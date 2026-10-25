@@ -33,7 +33,7 @@
       <main class="main-area">
         <header class="topbar">
           <div>
-            <p class="eyebrow">MAIL-SCOPE / HELYI MUNKATERÜLET</p>
+            <p class="eyebrow">MAIL-SCOPE <span id="app-version">0.1.0</span> / HELYI MUNKATERÜLET</p>
             <h1 id="page-title">Ügy és források</h1>
           </div>
           <div class="case-summary">
@@ -242,6 +242,9 @@
             <div id="search-groups" class="search-groups"></div>
             <div class="search-actions">
               <button id="run-detailed-search-button" class="button primary" type="button">Keresés</button>
+              <button id="export-search-csv-button" class="button quiet" type="button">CSV export</button>
+              <button id="export-search-eml-button" class="button quiet" type="button">EML ZIP + SHA-256</button>
+              <button id="export-search-pdf-button" class="button quiet" type="button">PDF / nyomtatás</button>
               <label class="field saved-search-name">
                 <span>Mentett keresés neve</span>
                 <input id="saved-search-name" type="text" maxlength="100" placeholder="Például: 2024-es mellékletes levelek">
@@ -274,6 +277,7 @@
             <button id="next-search-page" class="button quiet" type="button" disabled>Következő oldal</button>
           </div>
         </section>
+        <section id="search-print-report" class="search-print-report" aria-hidden="true"></section>
         <footer class="page-footer">Mail-Scope · offline levélvizsgáló · Bálint Szabolcs</footer>
       </main>
     </div>

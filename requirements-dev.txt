@@ -1,0 +1,3 @@
+# Project creator: Bálint Szabolcs
+# Tests use Python's standard-library unittest runner.
+-r requirements.txt
