@@ -4,11 +4,14 @@
 const state = {
   sources: [],
   folders: [],
+  people: [],
   discovered: [],
   messages: [],
+  conversation: null,
   offset: 0,
   selectedMessageId: null,
   pollTimer: null,
+  lastPeopleRefresh: "",
 };
 
 const element = (id) => document.getElementById(id);
@@ -132,6 +135,12 @@ function renderStatus(status) {
     }, 1200);
   }
   if (job && !job.running && job.summary) {
+    const summaryKey = JSON.stringify(job.summary);
+    if (state.lastPeopleRefresh !== summaryKey) {
+      state.lastPeopleRefresh = summaryKey;
+      refreshFolders();
+      refreshPeople();
+    }
     refreshArchive();
   }
 }
@@ -188,6 +197,92 @@ async function refreshFolders() {
   } catch (error) {
     if (!error.message.includes("Előbb nyisson meg")) showNotice(error.message, true);
   }
+}
+
+/**
+ * Load curated people and observed addresses for the active case.
+ */
+async function refreshPeople() {
+  try {
+    const result = await requestJson("/api/people");
+    state.people = result.people;
+    renderPeople(result.observed_addresses);
+  } catch (error) {
+    if (!error.message.includes("Előbb nyisson meg")) {
+      element("people-notice").textContent = error.message;
+    }
+  }
+}
+
+/**
+ * Render person checkboxes and still-unassigned indexed addresses.
+ */
+function renderPeople(observedAddresses) {
+  const peopleList = element("people-list");
+  const conversationPeople = element("conversation-people");
+  peopleList.replaceChildren();
+  conversationPeople.replaceChildren();
+  if (state.people.length === 0) {
+    peopleList.className = "people-list empty-state";
+    peopleList.textContent = "Még nincs személy. Hozzon létre személyt az indexelt címekből.";
+    conversationPeople.className = "conversation-people empty-state";
+    conversationPeople.textContent = "A beszélgetéshez előbb legalább két személyt rendeljen hozzá.";
+  } else {
+    peopleList.className = "people-list";
+    conversationPeople.className = "conversation-people";
+    state.people.forEach((person) => {
+      const label = document.createElement("label");
+      label.className = "person-row";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = String(person.id);
+      checkbox.dataset.personName = person.display_name;
+      const details = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = person.display_name;
+      const addresses = document.createElement("small");
+      addresses.textContent = person.addresses.length
+        ? person.addresses.join(", ")
+        : "Nincs hozzárendelt e-mail-cím";
+      details.append(name, addresses);
+      label.append(checkbox, details);
+      peopleList.append(label);
+
+      const conversationLabel = document.createElement("label");
+      conversationLabel.className = "conversation-person";
+      const conversationCheckbox = checkbox.cloneNode();
+      conversationLabel.append(conversationCheckbox, document.createTextNode(person.display_name));
+      conversationPeople.append(conversationLabel);
+    });
+  }
+
+  const addressList = element("observed-addresses");
+  addressList.replaceChildren();
+  if (observedAddresses.length === 0) {
+    addressList.className = "observed-addresses empty-state";
+    addressList.textContent = "Az indexelés után az e-mail-címek itt jelennek meg.";
+    return;
+  }
+  addressList.className = "observed-addresses";
+  observedAddresses.forEach((address) => {
+    const label = document.createElement("label");
+    label.className = "observed-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = address.address;
+    checkbox.disabled = address.person_id !== null;
+    const details = document.createElement("span");
+    details.append(document.createTextNode(address.address));
+    if (address.person_name || address.display_name) {
+      const note = document.createElement("small");
+      note.textContent = address.person_name
+        ? `Hozzárendelve: ${address.person_name}`
+        : `Megjelenő név: ${address.display_name}`;
+      details.append(note);
+    }
+    label.append(checkbox, details);
+    addressList.append(label);
+  });
 }
 
 /**
@@ -358,6 +453,255 @@ function appendBadgeSection(parent, title, values) {
 }
 
 /**
+ * Build the selected people, mode, date, thread, and text search parameters.
+ */
+function conversationParams() {
+  const personIds = [...element("conversation-people").querySelectorAll("input:checked")]
+    .map((checkbox) => checkbox.value);
+  const params = new URLSearchParams();
+  params.set("people", personIds.join(","));
+  params.set("mode", element("conversation-mode").value);
+  params.set("include_cc_bcc", element("conversation-cc-bcc").checked ? "1" : "0");
+  params.set("date_from", element("conversation-date-from").value);
+  params.set("date_to", element("conversation-date-to").value);
+  params.set("q", element("conversation-query").value.trim());
+  params.set("thread_key", element("conversation-thread").value);
+  return params;
+}
+
+/**
+ * Load the selected people conversation and update its topic selector.
+ */
+async function loadConversation() {
+  const params = conversationParams();
+  if (params.get("people").split(",").filter(Boolean).length < 2) {
+    element("conversation-notice").textContent = "Válasszon legalább két személyt.";
+    element("conversation-notice").classList.add("error");
+    return;
+  }
+  element("conversation-notice").textContent = "";
+  element("conversation-notice").classList.remove("error");
+  const button = element("conversation-run-button");
+  button.disabled = true;
+  try {
+    state.conversation = await requestJson(`/api/conversation?${params.toString()}`);
+    renderConversation(state.conversation);
+    const threadSelect = element("conversation-thread");
+    const selectedThread = threadSelect.value;
+    threadSelect.replaceChildren(new Option("Minden téma", ""));
+    state.conversation.threads.forEach((thread) => {
+      threadSelect.add(new Option(thread.subject, thread.key));
+    });
+    if ([...threadSelect.options].some((option) => option.value === selectedThread)) {
+      threadSelect.value = selectedThread;
+    }
+    const count = state.conversation.messages.length;
+    element("conversation-notice").textContent = `${count.toLocaleString("hu-HU")} levél · ${state.conversation.threads.length} téma`;
+    element("conversation-notice").classList.remove("error");
+  } catch (error) {
+    element("conversation-notice").textContent = error.message;
+    element("conversation-notice").classList.add("error");
+    state.conversation = null;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * Render month activity links and a date-grouped, person-colored timeline.
+ */
+function renderConversation(result) {
+  const container = element("conversation-results");
+  container.replaceChildren();
+  if (result.messages.length === 0) {
+    container.className = "conversation-results empty-state";
+    container.textContent = "Nincs a feltételeknek megfelelő levél.";
+    return;
+  }
+  container.className = "conversation-results";
+  const summary = document.createElement("div");
+  summary.className = "conversation-summary";
+  summary.textContent = `${result.messages.length.toLocaleString("hu-HU")} levél · ${result.people.map((person) => person.display_name).join(" · ")}`;
+  container.append(summary);
+
+  const activity = document.createElement("nav");
+  activity.className = "activity-strip";
+  activity.setAttribute("aria-label", "Havi levélaktivitás");
+  result.months.forEach((month) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "activity-month";
+    button.dataset.month = month.month;
+    const label = document.createElement("span");
+    label.textContent = formatMonth(month.month);
+    const count = document.createElement("strong");
+    count.textContent = String(month.count);
+    button.append(label, count);
+    button.addEventListener("click", () => {
+      container.querySelector(`[data-day^="${month.month}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    activity.append(button);
+  });
+  container.append(activity);
+
+  const timeline = document.createElement("div");
+  timeline.className = "timeline";
+  const palette = ["#7ce0a4", "#77b7f3", "#eea37b", "#c5a3f0", "#eed576", "#e98fbd", "#71d6d2", "#b7c47b"];
+  const personColors = new Map(result.people.map((person, index) => [person.id, palette[index % palette.length]]));
+  let currentDay = "";
+  result.messages.forEach((message) => {
+    if (message.day && message.day !== currentDay) {
+      currentDay = message.day;
+      const heading = document.createElement("h3");
+      heading.className = "timeline-day";
+      heading.dataset.day = message.day;
+      heading.textContent = new Intl.DateTimeFormat("hu-HU", {
+        year: "numeric", month: "long", day: "numeric", timeZone: "UTC",
+      }).format(new Date(`${message.day}T12:00:00Z`));
+      timeline.append(heading);
+      if (message.silent_days_before > 0) {
+        const gap = document.createElement("div");
+        gap.className = "silence-gap";
+        gap.textContent = `${message.silent_days_before} nap csend`;
+        timeline.append(gap);
+      }
+    }
+    timeline.append(conversationCard(message, result.people, personColors));
+  });
+  container.append(timeline);
+}
+
+/**
+ * Render one timeline entry without inserting untrusted message content as HTML.
+ */
+function conversationCard(message, people, personColors) {
+  const card = document.createElement("article");
+  card.className = "timeline-card";
+  card.id = `conversation-message-${message.message_id}`;
+  const sender = message.participants.find((participant) => participant.role === "from");
+  const senderIndex = people.findIndex((person) => person.id === sender?.person_id);
+  card.classList.add(senderIndex >= 0 && senderIndex % 2 === 1 ? "side-right" : "side-left");
+  card.style.setProperty(
+    "--speaker-color",
+    personColors.get(sender?.person_id) || "#7ce0a4",
+  );
+
+  const subject = document.createElement("div");
+  subject.className = "message-subject";
+  appendHighlightedText(subject, message.subject || "(nincs tárgy)", element("conversation-query").value.trim());
+  if (message.thread_key) {
+    const thread = document.createElement("span");
+    thread.className = "thread-chip";
+    thread.textContent = message.thread_key;
+    subject.append(thread);
+  }
+  const metadata = document.createElement("div");
+  metadata.className = "timeline-meta";
+  const senderName = document.createElement("span");
+  senderName.textContent = sender
+    ? `${sender.person_name} <${sender.address}>`
+    : "Ismeretlen feladó";
+  const time = document.createElement("time");
+  time.textContent = message.sent_at
+    ? new Intl.DateTimeFormat("hu-HU", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })
+      .format(new Date(message.sent_at))
+    : "Dátum nélkül";
+  metadata.append(senderName, time);
+  const otherParticipants = message.participants.filter((participant) =>
+    participant.role !== "from"
+    && (element("conversation-cc-bcc").checked || !["cc", "bcc"].includes(participant.role)),
+  );
+  const recipients = document.createElement("div");
+  recipients.className = "timeline-addresses";
+  recipients.textContent = otherParticipants.length
+    ? otherParticipants.map((participant) => {
+      const role = { to: "Címzett", cc: "CC", bcc: "BCC" }[participant.role] || participant.role;
+      return `${role}: ${participant.person_name} <${participant.address}>`;
+    }).join(" · ")
+    : "A résztvevők nincsenek hozzárendelve.";
+
+  const body = document.createElement("p");
+  body.className = "timeline-body collapsed";
+  appendHighlightedText(body, message.body || "(Nincs indexelt levéltörzs.)", element("conversation-query").value.trim());
+  const expand = document.createElement("button");
+  expand.type = "button";
+  expand.className = "timeline-open";
+  expand.textContent = "Teljes üzenet megjelenítése";
+  expand.addEventListener("click", () => {
+    const collapsed = body.classList.toggle("collapsed");
+    expand.textContent = collapsed ? "Teljes üzenet megjelenítése" : "Üzenet összecsukása";
+  });
+  const openOriginal = document.createElement("button");
+  openOriginal.type = "button";
+  openOriginal.className = "timeline-open";
+  openOriginal.textContent = "Eredeti levél megnyitása";
+  openOriginal.addEventListener("click", () => {
+    openMessage(Number(message.message_id));
+    element("archive-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  card.append(subject, metadata, recipients, body, expand, openOriginal);
+  return card;
+}
+
+/**
+ * Highlight literal search text using text nodes and mark elements.
+ */
+function appendHighlightedText(parent, text, search) {
+  if (!search) {
+    parent.append(document.createTextNode(text));
+    return;
+  }
+  const normalizedText = text.toLocaleLowerCase();
+  const normalizedSearch = search.toLocaleLowerCase();
+  let cursor = 0;
+  let match = normalizedText.indexOf(normalizedSearch, cursor);
+  while (match !== -1) {
+    parent.append(document.createTextNode(text.slice(cursor, match)));
+    const marker = document.createElement("mark");
+    marker.textContent = text.slice(match, match + search.length);
+    parent.append(marker);
+    cursor = match + search.length;
+    match = normalizedText.indexOf(normalizedSearch, cursor);
+  }
+  parent.append(document.createTextNode(text.slice(cursor)));
+}
+
+/**
+ * Format YYYY-MM activity keys into a compact localized month label.
+ */
+function formatMonth(value) {
+  const [year, month] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("hu-HU", { year: "numeric", month: "short", timeZone: "UTC" })
+    .format(new Date(Date.UTC(year, month - 1, 15)));
+}
+
+/**
+ * Download an EML ZIP and its SHA-256 manifest for the active conversation.
+ */
+async function exportConversationEml() {
+  if (!state.conversation) {
+    element("conversation-notice").textContent = "Előbb töltsön be egy beszélgetést.";
+    element("conversation-notice").classList.add("error");
+    return;
+  }
+  try {
+    const response = await fetch(`/api/conversation/export?${conversationParams().toString()}`);
+    if (!response.ok) {
+      const payload = await response.json();
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    const download = document.createElement("a");
+    download.href = URL.createObjectURL(await response.blob());
+    download.download = "Mail-Scope-conversation.eml.zip";
+    download.click();
+    URL.revokeObjectURL(download.href);
+  } catch (error) {
+    element("conversation-notice").textContent = error.message;
+    element("conversation-notice").classList.add("error");
+  }
+}
+
+/**
  * Discover sources under a user-selected file or directory.
  */
 element("discover-form").addEventListener("submit", async (event) => {
@@ -400,8 +744,12 @@ element("case-form").addEventListener("submit", async (event) => {
       method: "POST",
       body: JSON.stringify({ path: element("case-path").value.trim() }),
     });
+    state.lastPeopleRefresh = "";
+    state.people = [];
+    state.folders = [];
     renderStatus(status);
     await refreshFolders();
+    await refreshPeople();
     await refreshArchive();
     showNotice("Az ügy megnyitva. A források most már felismerhetők és indexelhetők.");
   } catch (error) {
@@ -416,6 +764,7 @@ element("index-button").addEventListener("click", async () => {
   const paths = [...element("discovered-list").querySelectorAll("input:checked")]
     .map((checkbox) => checkbox.value);
   try {
+    state.lastPeopleRefresh = "";
     renderStatus(await requestJson("/api/index", {
       method: "POST",
       body: JSON.stringify({ paths }),
@@ -451,12 +800,58 @@ element("archive-filters").addEventListener("submit", (event) => {
 element("load-more-button").addEventListener("click", () => refreshArchive(true));
 
 /**
+ * Create one curated person from selected, previously observed email aliases.
+ */
+element("person-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const addresses = [...element("observed-addresses").querySelectorAll("input:checked")]
+    .map((checkbox) => checkbox.value);
+  if (addresses.length === 0) {
+    element("people-notice").textContent = "Jelöljön ki legalább egy megfigyelt e-mail-címet.";
+    element("people-notice").classList.add("error");
+    return;
+  }
+  try {
+    const person = await requestJson("/api/people", {
+      method: "POST",
+      body: JSON.stringify({
+        display_name: element("person-name").value.trim(),
+        addresses,
+      }),
+    });
+    element("person-name").value = "";
+    element("people-notice").textContent = `${person.display_name} személy és ${person.addresses.length} alias mentve.`;
+    element("people-notice").classList.remove("error");
+    await refreshPeople();
+  } catch (error) {
+    element("people-notice").textContent = error.message;
+    element("people-notice").classList.add("error");
+  }
+});
+
+/**
+ * Load a conversation only after explicit participant selection and user action.
+ */
+element("conversation-run-button").addEventListener("click", loadConversation);
+element("conversation-thread").addEventListener("change", loadConversation);
+element("conversation-eml-button").addEventListener("click", exportConversationEml);
+element("conversation-pdf-button").addEventListener("click", () => {
+  if (!state.conversation) {
+    element("conversation-notice").textContent = "Előbb töltsön be egy beszélgetést.";
+    element("conversation-notice").classList.add("error");
+    return;
+  }
+  window.print();
+});
+
+/**
  * Load the case currently selected when the local page opens.
  */
 async function initialize() {
   const status = await refreshStatus();
   if (!status || !status.case) return;
   await refreshFolders();
+  await refreshPeople();
   await refreshArchive();
 }
 

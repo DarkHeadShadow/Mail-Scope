@@ -514,7 +514,8 @@ class IndexerTests(unittest.TestCase):
                     references_header, body, content_hash
                 ) VALUES (
                     'legacy', '<Legacy@Example.Test>', 'mid:legacy@example.test',
-                    'Régi', 'régi', NULL, NULL, NULL, 'Tartalom', 'hash'
+                    'Régi', 'régi', 'Sat, 1 Jan 2022 00:00:00 +0000',
+                    NULL, NULL, 'Tartalom', 'hash'
                 )
                 """
             )
@@ -545,7 +546,12 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(participant["address"], "antal@pelda.hu")
         self.assertEqual(participant["display_name"], "")
         self.assertEqual(normalized_id, "legacy@example.test")
-        self.assertEqual(upgraded.metadata_value("schema_version"), "3")
+        with upgraded.connection() as connection:
+            timestamp = connection.execute(
+                "SELECT sent_timestamp FROM messages WHERE id = 1"
+            ).fetchone()["sent_timestamp"]
+        self.assertEqual(timestamp, 1640995200)
+        self.assertEqual(upgraded.metadata_value("schema_version"), "4")
 
     def test_background_job_reports_progress_and_result(self) -> None:
         """Run indexing on a worker and expose its final progress and summary."""

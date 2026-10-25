@@ -111,7 +111,12 @@ Forrás lehet:
    Archívum böngésző. A case- és forrásfelismerés, háttérindexelés, mappa-/levéllista,
    szűrők és forenzikus megnyitás működik; a kiválasztott levél az eredeti forrásból
    töltődik be, SHA-256 ellenőrzés után. Indítás: `py -3.13 -m server`.
-5. Beszélgetés-nézet.
+5. [x] Beszélgetés-nézet: legalább két kézzel összerendelt személy kiválasztása;
+   egymás közti, közös és bármelyik kiválasztott személyt érintő levelek szűrése;
+   CC/BCC- és dátumkapcsolók, szál- és teljes szöveges keresés, személyszínek,
+   havi aktivitás és napokra bontott idővonal csendjelzéssel. A nyomtatási nézetből
+   PDF menthető, az EML ZIP SHA-256 jegyzéket tartalmaz; export előtt az eredeti
+   források hash-e ellenőrzött.
 6. Részletes keresés, címkék, mentett keresések.
 7. Exportok, PyInstaller build, README (magyar és angol).
 8. Felkészítés a GitHubra (lásd lent), első kiadás.

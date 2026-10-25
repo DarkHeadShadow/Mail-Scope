@@ -2,24 +2,31 @@
 
 __author__ = "Bálint Szabolcs"
 
+import calendar
+import hashlib
 import json
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import threading
+import zipfile
 from dataclasses import asdict
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from indexer import IndexDatabase, IndexingJob, IndexingService
+from indexer import IndexDatabase, IndexingJob, IndexingService, PersonDirectory
+from sources.models import MessageLocator
 from sources.content import message_body_text
 from sources.discover import DiscoveredSource, discover_sources, sha256_file
-from sources.models import MessageLocator
 from sources.reader_factory import open_source
 
 
@@ -172,7 +179,207 @@ class MailScopeApplication:
                 )
             ]
 
-    def open_message(self, message_id: int) -> dict[str, Any]:
+    def people(self) -> dict[str, list[dict[str, Any]]]:
+        """Return curated people and observed addresses available for assignment."""
+        with self._lock:
+            database = self._require_case()
+            directory = PersonDirectory(database)
+            return {
+                "people": [asdict(person) for person in directory.people()],
+                "observed_addresses": [
+                    _row_json(row) for row in database.observed_addresses()
+                ],
+            }
+
+    def create_person(
+        self, display_name: str, addresses: tuple[str, ...]
+    ) -> dict[str, Any]:
+        """Create a person and assign their selected observed email aliases."""
+        with self._lock:
+            database = self._require_case()
+            person = PersonDirectory(database).create_person(display_name, addresses)
+            return asdict(person)
+
+    def conversation(
+        self,
+        *,
+        person_ids: tuple[int, ...],
+        mode: str,
+        include_cc_bcc: bool,
+        date_from: str,
+        date_to: str,
+        query: str,
+        thread_key: str | None,
+    ) -> dict[str, Any]:
+        """Build a dated, person-based conversation timeline and activity summary."""
+        with self._lock:
+            database = self._require_case()
+            if len(person_ids) < 2 or len(set(person_ids)) != len(person_ids):
+                raise ValueError("A beszélgetésnézethez legalább két különböző személyt válasszon.")
+            if len(person_ids) > 50:
+                raise ValueError("Egyszerre legfeljebb 50 személy választható.")
+            if len(query) > _MAX_QUERY_LENGTH:
+                raise ValueError("A beszélgetés keresőkifejezése legfeljebb 512 karakter lehet.")
+            selected_people = {
+                person.id: person
+                for person in PersonDirectory(database).people()
+                if person.id in person_ids
+            }
+            if len(selected_people) != len(person_ids):
+                raise ValueError("A kijelölt személyek között ismeretlen azonosító szerepel.")
+            start_date = _optional_date(date_from, "Kezdő dátum")
+            end_date = _optional_date(date_to, "Záró dátum")
+            if start_date is not None and end_date is not None and start_date > end_date:
+                raise ValueError("A kezdő dátum nem lehet későbbi a záró dátumnál.")
+            start_timestamp = (
+                None
+                if start_date is None
+                else calendar.timegm(
+                    datetime.combine(
+                        start_date, datetime.min.time(), tzinfo=timezone.utc
+                    ).utctimetuple()
+                )
+            )
+            end_timestamp = (
+                None
+                if end_date is None or end_date == date.max
+                else calendar.timegm(
+                    datetime.combine(
+                        end_date + timedelta(days=1),
+                        datetime.min.time(),
+                        tzinfo=timezone.utc,
+                    ).utctimetuple()
+                )
+            )
+
+            rows = database.conversation_messages(
+                person_ids,
+                mode=mode,
+                include_cc_bcc=include_cc_bcc,
+                query=query,
+                thread_key=thread_key,
+                date_from_timestamp=start_timestamp,
+                date_to_timestamp=end_timestamp,
+                limit=10001,
+            )
+            if len(rows) > 10000:
+                raise ApiError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    "A beszélgetés több mint 10 000 levelet tartalmaz; szűkítsen dátumra vagy témára.",
+                )
+            participant_rows = database.conversation_participants(
+                tuple(int(row["message_id"]) for row in rows)
+            )
+            participants_by_message: dict[int, list[dict[str, Any]]] = {}
+            for participant in participant_rows:
+                message_id = int(participant["message_id"])
+                person_id = (
+                    None
+                    if participant["person_id"] is None
+                    else int(participant["person_id"])
+                )
+                participants_by_message.setdefault(message_id, []).append(
+                    {
+                        "role": str(participant["role"]),
+                        "address": str(participant["address"]),
+                        "display_name": str(participant["display_name"] or ""),
+                        "person_id": person_id,
+                        "person_name": (
+                            str(participant["person_name"])
+                            if participant["person_name"] is not None
+                            else str(participant["display_name"] or participant["address"])
+                        ),
+                        "selected": person_id in selected_people,
+                    }
+                )
+
+            messages: list[dict[str, Any]] = []
+            for row in rows:
+                sent_at = _parse_message_date(row["sent_date"])
+                sent_day = None if sent_at is None else sent_at.date()
+                if start_date is not None and (sent_day is None or sent_day < start_date):
+                    continue
+                if end_date is not None and (sent_day is None or sent_day > end_date):
+                    continue
+                message = _row_json(row)
+                message["sent_at"] = None if sent_at is None else sent_at.isoformat()
+                message["day"] = None if sent_day is None else sent_day.isoformat()
+                message["participants"] = participants_by_message.get(
+                    int(row["message_id"]), []
+                )
+                messages.append(message)
+            messages.sort(
+                key=lambda message: (
+                    message["sent_at"] is None,
+                    message["sent_at"] or "",
+                    message["message_id"],
+                )
+            )
+
+            months: dict[str, int] = {}
+            threads: dict[str, str] = {}
+            previous_day: date | None = None
+            for message in messages:
+                message_date = _optional_date(message["day"] or "", "Levél dátuma")
+                if message_date is None:
+                    message["silent_days_before"] = 0
+                    continue
+                if previous_day is not None:
+                    message["silent_days_before"] = max(
+                        0, (message_date - previous_day).days - 1
+                    )
+                else:
+                    message["silent_days_before"] = 0
+                previous_day = message_date
+                month = message_date.strftime("%Y-%m")
+                months[month] = months.get(month, 0) + 1
+                threads[str(message["thread_key"])] = str(
+                    message["subject"] or "(nincs tárgy)"
+                )
+            return {
+                "people": [asdict(selected_people[person_id]) for person_id in person_ids],
+                "messages": messages,
+                "months": [
+                    {"month": month, "count": count}
+                    for month, count in sorted(months.items())
+                ],
+                "threads": [
+                    {"key": key, "subject": subject}
+                    for key, subject in sorted(
+                        threads.items(), key=lambda item: (item[1].casefold(), item[0])
+                    )
+                ],
+                "truncated": False,
+            }
+
+    def conversation_eml_zip(self, **filters: Any) -> bytes:
+        """Build a ZIP of verified original messages and their SHA-256 manifest."""
+        result = self.conversation(**filters)
+        messages = result["messages"]
+        if len(messages) > 500:
+            raise ApiError(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                "Az EML ZIP-export legfeljebb 500 levelet tartalmazhat; szűkítse a keresést.",
+            )
+        archive = BytesIO()
+        hashes: list[str] = []
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+            for index, message in enumerate(messages, start=1):
+                opened = self.open_message(int(message["message_id"]), include_raw=True)
+                raw = opened["raw_eml"]
+                digest = hashlib.sha256(raw).hexdigest()
+                filename = _safe_eml_filename(index, str(message["subject"] or "level"))
+                output.writestr(filename, raw)
+                hashes.append(f"{digest}  {filename}")
+            output.writestr(
+                "SHA256SUMS.txt",
+                ("SHA-256: " + "\n".join(hashes) + "\n").encode("utf-8"),
+            )
+        return archive.getvalue()
+
+    def open_message(
+        self, message_id: int, *, include_raw: bool = False
+    ) -> dict[str, Any]:
         """Load a selected message from its original source after hash verification."""
         with self._lock:
             database = self._require_case()
@@ -229,7 +436,7 @@ class MailScopeApplication:
                     HTTPStatus.UNPROCESSABLE_ENTITY,
                     f"A levél nem olvasható az eredeti forrásból: {error}",
                 ) from error
-            return {
+            result: dict[str, Any] = {
                 "message": _row_json(indexed_message),
                 "headers": _message_headers(raw_message),
                 "body": body,
@@ -242,6 +449,9 @@ class MailScopeApplication:
                 "occurrences": [_row_json(row) for row in occurrences],
                 "opened_from_occurrence": int(occurrence["id"]),
             }
+            if include_raw:
+                result["raw_eml"] = raw_message.as_bytes()
+            return result
 
     def _verified_source_hash(self, source_path: Path) -> str:
         """Hash each unchanged source once, invalidating the cache on file metadata changes."""
@@ -286,8 +496,32 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     [_row_json(row) for row in database.folders()],
                 )
+            elif request.path == "/api/people":
+                self._send_json(HTTPStatus.OK, self.server.application.people())
             elif request.path == "/api/archive":
                 self._send_archive(parse_qs(request.query))
+            elif request.path == "/api/conversation":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.application.conversation(
+                        **self._conversation_filters(parse_qs(request.query))
+                    ),
+                )
+            elif request.path == "/api/conversation/export":
+                archive = self.server.application.conversation_eml_zip(
+                    **self._conversation_filters(parse_qs(request.query))
+                )
+                self.send_response(HTTPStatus.OK.value)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header(
+                    "Content-Disposition",
+                    'attachment; filename="Mail-Scope-conversation.eml.zip"',
+                )
+                self.send_header("Content-Length", str(len(archive)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(archive)
             elif request.path.startswith("/api/messages/"):
                 message_id = _positive_integer(request.path.removeprefix("/api/messages/"))
                 self._send_json(
@@ -317,6 +551,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == "/api/case":
                 response = self.server.application.select_case(_required_string(payload, "path"))
+            elif path == "/api/people":
+                display_name = _required_string(payload, "display_name")
+                addresses = payload.get("addresses", [])
+                if not isinstance(addresses, list) or not all(
+                    isinstance(address, str) for address in addresses
+                ):
+                    raise ValueError("Az addresses mező e-mail-címek listája legyen.")
+                response = self.server.application.create_person(
+                    display_name, tuple(addresses)
+                )
             elif path == "/api/discover":
                 response = {
                     "sources": self.server.application.discover(
@@ -373,6 +617,27 @@ class _RequestHandler(BaseHTTPRequestHandler):
             offset=offset,
         )
         self._send_json(HTTPStatus.OK, {"messages": result})
+
+    @staticmethod
+    def _conversation_filters(query: dict[str, list[str]]) -> dict[str, Any]:
+        """Parse and validate all reusable conversation and export parameters."""
+        raw_people = _single_value(query, "people")
+        try:
+            person_ids = tuple(int(value) for value in raw_people.split(",") if value)
+        except ValueError as error:
+            raise ValueError("A people paraméter személyazonosítók listája legyen.") from error
+        if not person_ids or any(person_id <= 0 for person_id in person_ids):
+            raise ValueError("Válasszon ki legalább két személyt a beszélgetéshez.")
+        include_cc_bcc = _truthy(query, "include_cc_bcc")
+        return {
+            "person_ids": person_ids,
+            "mode": _single_value(query, "mode") or "between",
+            "include_cc_bcc": include_cc_bcc,
+            "date_from": _single_value(query, "date_from"),
+            "date_to": _single_value(query, "date_to"),
+            "query": _single_value(query, "q"),
+            "thread_key": _single_value(query, "thread_key") or None,
+        }
 
     def _read_json(self) -> dict[str, Any]:
         """Read a bounded JSON object and reject other request content types."""
@@ -551,3 +816,39 @@ def _file_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int]
         int(file_stat.st_mtime_ns),
         int(file_stat.st_ctime_ns),
     )
+
+
+def _optional_date(value: str, label: str) -> date | None:
+    """Parse a strict YYYY-MM-DD date filter while allowing an empty value."""
+    if not value:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"{label}: YYYY-MM-DD formátum szükséges.")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"{label}: érvénytelen naptári dátum.") from error
+
+
+def _parse_message_date(value: str | None) -> datetime | None:
+    """Normalize RFC 5322 message dates to UTC, leaving invalid dates explicitly empty."""
+    if not value:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _safe_eml_filename(index: int, subject: str) -> str:
+    """Create a stable ZIP entry name without path separators or control characters."""
+    safe_subject = re.sub(r"[^\w.-]+", "_", subject, flags=re.UNICODE).strip("._")
+    return f"{index:05d}_{safe_subject[:80] or 'level'}.eml"

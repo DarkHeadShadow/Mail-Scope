@@ -2,10 +2,13 @@
 
 __author__ = "Bálint Szabolcs"
 
+import calendar
 import sqlite3
 from contextlib import contextmanager
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 from sources.models import MessageLocator, MessageMetadata
 
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
     subject TEXT NOT NULL,
     normalized_subject TEXT NOT NULL,
     sent_date TEXT,
+    sent_timestamp INTEGER,
     in_reply_to TEXT,
     references_header TEXT,
     body TEXT NOT NULL,
@@ -209,6 +213,20 @@ class IndexDatabase:
                             """,
                             (_normalize_message_id(row["message_id"]), row["id"]),
                         )
+                if "sent_timestamp" not in message_columns:
+                    connection.execute(
+                        "ALTER TABLE messages ADD COLUMN sent_timestamp INTEGER"
+                    )
+                    for row in connection.execute(
+                        """
+                        SELECT id, sent_date FROM messages
+                        WHERE sent_date IS NOT NULL
+                        """
+                    ).fetchall():
+                        connection.execute(
+                            "UPDATE messages SET sent_timestamp = ? WHERE id = ?",
+                            (_parse_message_timestamp(row["sent_date"]), row["id"]),
+                        )
                 connection.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_messages_normalized_message_id
@@ -220,7 +238,13 @@ class IndexDatabase:
                     INSERT INTO app_metadata(key, value) VALUES (?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
-                    ("schema_version", "3"),
+                    ("schema_version", "4"),
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_messages_sent_timestamp
+                    ON messages(sent_timestamp)
+                    """
                 )
         except sqlite3.OperationalError as error:
             if "fts5" in str(error).casefold():
@@ -446,9 +470,9 @@ class IndexDatabase:
                     """
                     INSERT INTO messages (
                         dedup_key, message_id, normalized_message_id, thread_key, subject,
-                        normalized_subject, sent_date, in_reply_to,
+                        normalized_subject, sent_date, sent_timestamp, in_reply_to,
                         references_header, body, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         dedup_key,
@@ -458,6 +482,7 @@ class IndexDatabase:
                         metadata.subject,
                         normalized_subject,
                         metadata.date,
+                        _parse_message_timestamp(metadata.date),
                         metadata.in_reply_to,
                         metadata.references,
                         metadata.text_body,
@@ -480,6 +505,7 @@ class IndexDatabase:
                             WHEN normalized_subject = '' THEN ? ELSE normalized_subject
                         END,
                         sent_date = COALESCE(sent_date, ?),
+                        sent_timestamp = COALESCE(sent_timestamp, ?),
                         in_reply_to = COALESCE(in_reply_to, ?),
                         references_header = COALESCE(references_header, ?)
                     WHERE id = ?
@@ -490,6 +516,7 @@ class IndexDatabase:
                         _normalize_message_id(metadata.message_id or ""),
                         normalized_subject,
                         metadata.date,
+                        _parse_message_timestamp(metadata.date),
                         metadata.in_reply_to,
                         metadata.references,
                         message_id,
@@ -816,6 +843,197 @@ class IndexDatabase:
                 (message_id,),
             ).fetchone()
 
+    def conversation_messages(
+        self,
+        person_ids: tuple[int, ...],
+        *,
+        mode: str,
+        include_cc_bcc: bool,
+        query: str = "",
+        thread_key: str | None = None,
+        date_from_timestamp: int | None = None,
+        date_to_timestamp: int | None = None,
+        limit: int = 10001,
+    ) -> list[sqlite3.Row]:
+        """Select deduplicated messages for a person-based conversation view."""
+        if not person_ids or any(person_id <= 0 for person_id in person_ids):
+            raise ValueError("At least one valid person must be selected")
+        if mode not in {"between", "shared", "any"}:
+            raise ValueError(f"Unsupported conversation mode: {mode}")
+        if limit <= 0:
+            raise ValueError("Conversation result limit must be positive")
+
+        role_filter = (
+            "participant.role IN ('from', 'to', 'cc', 'bcc')"
+            if include_cc_bcc
+            else "participant.role IN ('from', 'to')"
+        )
+        participant_role_list = (
+            "'from', 'to', 'cc', 'bcc'" if include_cc_bcc else "'from', 'to'"
+        )
+        placeholders = ", ".join("?" for _ in person_ids)
+        selected = f"assigned.person_id IN ({placeholders})"
+        filters = [
+            f"""
+            EXISTS (
+                SELECT 1
+                FROM participants AS participant
+                JOIN person_addresses AS assigned
+                  ON assigned.address = participant.address
+                WHERE participant.message_id = messages.id
+                  AND {role_filter}
+                  AND {selected}
+            )
+            """
+        ]
+        parameters: list[Any] = [*person_ids]
+        if mode == "shared":
+            filters.append(
+                f"""
+                (
+                    SELECT count(DISTINCT assigned.person_id)
+                    FROM participants AS participant
+                    JOIN person_addresses AS assigned
+                      ON assigned.address = participant.address
+                    WHERE participant.message_id = messages.id
+                      AND {role_filter}
+                      AND {selected}
+                ) = ?
+                """
+            )
+            parameters.extend(person_ids)
+            parameters.append(len(person_ids))
+        elif mode == "between":
+            filters.extend(
+                (
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM participants AS sender
+                        JOIN person_addresses AS sender_person
+                          ON sender_person.address = sender.address
+                        WHERE sender.message_id = messages.id
+                          AND sender.role = 'from'
+                          AND sender_person.person_id IN ({placeholders})
+                    )
+                    """,
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM participants AS recipient
+                        JOIN person_addresses AS recipient_person
+                          ON recipient_person.address = recipient.address
+                        WHERE recipient.message_id = messages.id
+                          AND recipient.role = 'to'
+                          AND recipient_person.person_id IN ({placeholders})
+                    )
+                    """,
+                    f"""
+                    NOT EXISTS (
+                        SELECT 1 FROM participants AS outside_participant
+                        LEFT JOIN person_addresses AS outside_person
+                          ON outside_person.address = outside_participant.address
+                        WHERE outside_participant.message_id = messages.id
+                          AND outside_participant.role IN ({participant_role_list})
+                          AND (
+                              outside_person.person_id IS NULL
+                              OR outside_person.person_id NOT IN ({placeholders})
+                          )
+                    )
+                    """,
+                )
+            )
+            parameters.extend(person_ids)
+            parameters.extend(person_ids)
+            parameters.extend(person_ids)
+        if query.strip():
+            filters.append("messages_fts MATCH ?")
+            parameters.append(query)
+        if thread_key:
+            filters.append("messages.thread_key = ?")
+            parameters.append(thread_key)
+        if date_from_timestamp is not None:
+            filters.append("messages.sent_timestamp >= ?")
+            parameters.append(date_from_timestamp)
+        if date_to_timestamp is not None:
+            filters.append("messages.sent_timestamp < ?")
+            parameters.append(date_to_timestamp)
+        parameters.append(limit)
+        fts_join = (
+            "JOIN messages_fts ON messages_fts.rowid = messages.id"
+            if query.strip()
+            else ""
+        )
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT messages.id AS message_id, messages.subject,
+                           messages.sent_date, messages.message_id AS internet_message_id,
+                           messages.thread_key, messages.body, messages.content_hash
+                    FROM messages
+                    """
+                    + fts_join
+                    + """
+                    WHERE """
+                    + " AND ".join(filters)
+                    + """
+                    ORDER BY messages.sent_timestamp IS NULL,
+                             messages.sent_timestamp, messages.id
+                    LIMIT ?
+                    """,
+                    parameters,
+                )
+            )
+
+    def conversation_participants(
+        self, message_ids: tuple[int, ...]
+    ) -> list[sqlite3.Row]:
+        """Return role-tagged participants for selected conversation messages."""
+        if not message_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT participants.message_id, participants.role,
+                           participants.address, participants.display_name,
+                           people.id AS person_id, people.display_name AS person_name
+                    FROM participants
+                    LEFT JOIN person_addresses
+                      ON person_addresses.address = participants.address
+                    LEFT JOIN people ON people.id = person_addresses.person_id
+                    WHERE participants.message_id IN ({placeholders})
+                    ORDER BY participants.message_id, participants.role,
+                             participants.address
+                    """,
+                    message_ids,
+                )
+            )
+
+    def observed_addresses(self) -> list[sqlite3.Row]:
+        """List distinct indexed email addresses and the first observed display name."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT participants.address,
+                           min(participants.display_name) AS display_name,
+                           person_addresses.person_id,
+                           people.display_name AS person_name
+                    FROM participants
+                    LEFT JOIN person_addresses
+                      ON person_addresses.address = participants.address
+                    LEFT JOIN people ON people.id = person_addresses.person_id
+                    GROUP BY participants.address, person_addresses.person_id,
+                             people.display_name
+                    ORDER BY lower(coalesce(people.display_name,
+                                            min(participants.display_name),
+                                            participants.address)),
+                             participants.address
+                    """
+                )
+            )
+
     def occurrences_for_message(self, message_id: int) -> list[sqlite3.Row]:
         """Return source locators and integrity metadata for every message copy."""
         with self.connection() as connection:
@@ -1102,6 +1320,24 @@ def _normalize_message_id(message_id: str) -> str:
     if normalized.startswith("<") and normalized.endswith(">"):
         return normalized[1:-1]
     return normalized
+
+
+def _parse_message_timestamp(sent_date: str | None) -> int | None:
+    """Convert an RFC 5322 Date header to a sortable UTC Unix timestamp."""
+    if not sent_date:
+        return None
+    try:
+        parsed = parsedate_to_datetime(sent_date)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return calendar.timegm(parsed.astimezone(timezone.utc).utctimetuple())
+    except (OverflowError, ValueError):
+        return None
 
 
 def _normalize_addresses(addresses: tuple[str, ...]) -> tuple[str, ...]:

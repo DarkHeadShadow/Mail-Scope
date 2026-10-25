@@ -8,27 +8,49 @@ import json
 import tempfile
 import threading
 import unittest
+import zipfile
 from email import policy
 from email.message import EmailMessage
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+from indexer import IndexDatabase, IndexingService, PersonDirectory
 from server import ApiError, MailScopeApplication, create_server
-from sources.discover import sha256_file
+from sources.discover import discover_sources, sha256_file
 
 
-def _fixture_mbox() -> bytes:
+def _fixture_mail(
+    *,
+    subject: str = "Kitalált levél a helyi felület tesztjéhez",
+    sender: str = "antal@pelda.hu",
+    recipient: str = "anna@pelda.hu",
+    sent_date: str = "Sat, 1 Jan 2022 00:00:00 +0000",
+    message_id: str = "<fixture@example.test>",
+    body: str = "Ez egy kitalált üzenettörzs.",
+    cc: str | None = None,
+    references: str | None = None,
+) -> bytes:
     """Create a fictional mailbox message without any real personal data."""
     message = EmailMessage()
-    message["From"] = "Teszt Antal <antal@pelda.hu>"
-    message["To"] = "Teszt Anna <anna@pelda.hu>"
-    message["Subject"] = "Kitalált levél a helyi felület tesztjéhez"
-    message["Message-ID"] = "<fixture@example.test>"
-    message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
-    message.set_content("Ez egy kitalált üzenettörzs.")
+    message["From"] = sender
+    message["To"] = recipient
+    if cc is not None:
+        message["Cc"] = cc
+    message["Subject"] = subject
+    message["Message-ID"] = message_id
+    message["Date"] = sent_date
+    if references is not None:
+        message["References"] = references
+    message.set_content(body)
     return b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + message.as_bytes(
         policy=policy.SMTP
     )
+
+
+def _fixture_mbox() -> bytes:
+    """Create the one-message synthetic mailbox used by local server tests."""
+    return _fixture_mail()
 
 
 class ServerTests(unittest.TestCase):
@@ -124,6 +146,205 @@ class ServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_server(host="0.0.0.0", port=8765)
 
+    def test_conversation_modes_dates_threads_and_activity(self) -> None:
+        """Apply person modes, CC filtering, time range, thread, and text query."""
+        mailbox = self.root / "beszelgetes.mbox"
+        mailbox.write_bytes(
+            _fixture_mail(
+                subject="Kitalált projekt",
+                message_id="<projekt-root@example.test>",
+                sent_date="Sat, 1 Jan 2022 09:00:00 +0000",
+                body="Nyitó levél.",
+            )
+            + _fixture_mail(
+                sender="anna@pelda.hu",
+                recipient="antal@pelda.hu",
+                subject="Re: Kitalált projekt",
+                message_id="<projekt-reply@example.test>",
+                references="<projekt-root@example.test>",
+                sent_date="Mon, 3 Jan 2022 09:00:00 +0000",
+                body="Különleges visszajelzés.",
+            )
+            + _fixture_mail(
+                subject="Re: Kitalált projekt",
+                message_id="<projekt-cc@example.test>",
+                references="<projekt-root@example.test>",
+                cc="bela@pelda.hu",
+                sent_date="Wed, 5 Jan 2022 09:00:00 +0000",
+                body="Közös egyeztetés.",
+            )
+            + _fixture_mail(
+                sender="bela@pelda.hu",
+                recipient="antal@pelda.hu",
+                subject="Kitalált továbbítás",
+                message_id="<projekt-forward@example.test>",
+                cc="anna@pelda.hu",
+                sent_date="Sat, 8 Jan 2022 09:00:00 +0000",
+                body="Továbbított levél.",
+            )
+            + _fixture_mail(
+                sender="bela@pelda.hu",
+                recipient="anna@pelda.hu",
+                subject="Kitalált hármas egyeztetés",
+                message_id="<projekt-shared@example.test>",
+                cc="antal@pelda.hu",
+                sent_date="Mon, 10 Jan 2022 09:00:00 +0000",
+                body="Három résztvevő egyeztetése.",
+            )
+        )
+        database = IndexDatabase.for_case(self.case_directory)
+        IndexingService(database).index_sources(discover_sources(mailbox))
+        directory = PersonDirectory(database)
+        antal = directory.create_person("Teszt Antal", ("antal@pelda.hu",))
+        anna = directory.create_person("Teszt Anna", ("anna@pelda.hu",))
+        bela = directory.create_person("Teszt Béla", ("bela@pelda.hu",))
+        self.application.select_case(str(self.case_directory))
+
+        between_with_copy = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="between",
+            include_cc_bcc=True,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key=None,
+        )
+        self.assertEqual(len(between_with_copy["messages"]), 2)
+        self.assertEqual(len(between_with_copy["months"]), 1)
+        self.assertEqual(between_with_copy["months"][0]["count"], 2)
+        self.assertEqual(
+            {message["thread_key"] for message in between_with_copy["messages"]},
+            {"mid:projekt-root@example.test"},
+        )
+        self.assertEqual(between_with_copy["messages"][1]["silent_days_before"], 1)
+
+        between_without_copy = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="between",
+            include_cc_bcc=False,
+            date_from="2022-01-03",
+            date_to="2022-01-05",
+            query="",
+            thread_key=None,
+        )
+        self.assertEqual(len(between_without_copy["messages"]), 2)
+        self.assertEqual(
+            [message["day"] for message in between_without_copy["messages"]],
+            ["2022-01-03", "2022-01-05"],
+        )
+        thread_results = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="between",
+            include_cc_bcc=False,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key="mid:projekt-root@example.test",
+        )
+        self.assertEqual(len(thread_results["messages"]), 3)
+
+        shared = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="shared",
+            include_cc_bcc=True,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key=None,
+        )
+        self.assertEqual(
+            [message["internet_message_id"] for message in shared["messages"]],
+            [
+                "<projekt-root@example.test>",
+                "<projekt-reply@example.test>",
+                "<projekt-cc@example.test>",
+                "<projekt-forward@example.test>",
+                "<projekt-shared@example.test>",
+            ],
+        )
+        shared_without_copy = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="shared",
+            include_cc_bcc=False,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key=None,
+        )
+        self.assertEqual(len(shared_without_copy["messages"]), 3)
+
+        any_selected = self.application.conversation(
+            person_ids=(antal.id, anna.id),
+            mode="any",
+            include_cc_bcc=False,
+            date_from="",
+            date_to="",
+            query="Különleges",
+            thread_key=None,
+        )
+        self.assertEqual(len(any_selected["messages"]), 1)
+        self.assertIn("Különleges", any_selected["messages"][0]["body"])
+
+        all_three = self.application.conversation(
+            person_ids=(antal.id, anna.id, bela.id),
+            mode="shared",
+            include_cc_bcc=True,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key=None,
+        )
+        self.assertEqual(len(all_three["messages"]), 3)
+        self.assertTrue(
+            all(len(message["participants"]) == 3 for message in all_three["messages"])
+        )
+
+    def test_conversation_eml_zip_contains_manifest_of_verified_messages(self) -> None:
+        """Export selected originals with stable safe entry names and SHA-256s."""
+        mailbox = self.root / "export.mbox"
+        mailbox.write_bytes(
+            _fixture_mail(
+                subject="../../unsafe:first",
+                message_id="<export-one@example.test>",
+                body="Első levél.",
+            )
+            + _fixture_mail(
+                sender="anna@pelda.hu",
+                recipient="antal@pelda.hu",
+                subject="Második levél",
+                message_id="<export-two@example.test>",
+                body="Második levél tartalma.",
+            )
+        )
+        database = IndexDatabase.for_case(self.case_directory)
+        IndexingService(database).index_sources(discover_sources(mailbox))
+        directory = PersonDirectory(database)
+        antal = directory.create_person("Teszt Antal", ("antal@pelda.hu",))
+        anna = directory.create_person("Teszt Anna", ("anna@pelda.hu",))
+        self.application.select_case(str(self.case_directory))
+
+        archive_bytes = self.application.conversation_eml_zip(
+            person_ids=(antal.id, anna.id),
+            mode="between",
+            include_cc_bcc=True,
+            date_from="",
+            date_to="",
+            query="",
+            thread_key=None,
+        )
+
+        with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
+            names = archive.namelist()
+            self.assertEqual(len(names), 3)
+            self.assertIn("SHA256SUMS.txt", names)
+            eml_names = [name for name in names if name.endswith(".eml")]
+            self.assertEqual(len(eml_names), 2)
+            self.assertTrue(all("/" not in name and "\\" not in name for name in eml_names))
+            manifest = archive.read("SHA256SUMS.txt").decode("utf-8")
+            for name in eml_names:
+                digest = hashlib.sha256(archive.read(name)).hexdigest()
+                self.assertIn(f"{digest}  {name}", manifest)
+
     def test_http_ui_and_same_origin_case_api(self) -> None:
         """Serve local assets and enforce host and origin checks on writes."""
         http_server = create_server(self.application, port=0)
@@ -170,6 +391,41 @@ class ServerTests(unittest.TestCase):
         response = connection.getresponse()
         self.assertEqual(response.status, 200)
         self.assertEqual(json.loads(response.read())["case"]["path"], str(self.case_directory))
+
+        for name in ("Teszt Antal", "Teszt Anna"):
+            person_body = json.dumps({"display_name": name, "addresses": []})
+            connection.request(
+                "POST",
+                "/api/people",
+                body=person_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": f"http://127.0.0.1:{port}",
+                },
+            )
+            self.assertEqual(connection.getresponse().status, 200)
+
+        connection.request("GET", "/api/people")
+        people_response = connection.getresponse()
+        people = json.loads(people_response.read())
+        self.assertEqual(len(people["people"]), 2)
+        identifiers = ",".join(str(person["id"]) for person in people["people"])
+        connection.request(
+            "GET",
+            f"/api/conversation?people={identifiers}&mode=any&include_cc_bcc=1",
+        )
+        conversation_response = connection.getresponse()
+        self.assertEqual(conversation_response.status, 200)
+        self.assertEqual(json.loads(conversation_response.read())["messages"], [])
+        connection.request(
+            "GET",
+            f"/api/conversation/export?people={identifiers}&mode=any&include_cc_bcc=1",
+        )
+        export_response = connection.getresponse()
+        self.assertEqual(export_response.status, 200)
+        self.assertIn(".eml.zip", export_response.getheader("Content-Disposition"))
+        with zipfile.ZipFile(BytesIO(export_response.read())) as export:
+            self.assertEqual(export.namelist(), ["SHA256SUMS.txt"])
 
 
 if __name__ == "__main__":

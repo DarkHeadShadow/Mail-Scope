@@ -20,6 +20,7 @@
         <p class="eyebrow">MUNKATERÜLET</p>
         <a class="side-link active" href="#case-panel"><span>01</span> Ügy és források</a>
         <a class="side-link" href="#archive-panel"><span>02</span> Archívum böngésző</a>
+        <a class="side-link" href="#conversation-panel"><span>03</span> Beszélgetésnézet</a>
         <div class="sidebar-spacer"></div>
         <div class="privacy-card">
           <span class="privacy-dot"></span>
@@ -86,10 +87,89 @@
           <p id="case-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
 
+        <section class="panel people-panel" id="people-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">02 / SZEMÉLYEK</p>
+              <h2>Személyek és e-mail-aliasok</h2>
+              <p class="muted">A beszélgetésnézet személyeket, nem külön e-mail-címeket kapcsol össze.</p>
+            </div>
+          </div>
+          <div class="people-layout">
+            <div>
+              <h3>Ismert személyek</h3>
+              <div id="people-list" class="people-list empty-state">Nyisson meg egy indexelt ügyet.</div>
+            </div>
+            <form id="person-form" class="person-form">
+              <h3>Új személy összerendelése</h3>
+              <label class="field">
+                <span>Személy neve</span>
+                <input id="person-name" type="text" placeholder="Például: Teszt Antal" required>
+              </label>
+              <div class="field">
+                <span>Megfigyelt e-mail-címek</span>
+                <div id="observed-addresses" class="observed-addresses empty-state">Az indexelt levelek címei itt jelennek meg.</div>
+              </div>
+              <button class="button secondary" type="submit">Személy és aliasok mentése</button>
+            </form>
+          </div>
+          <p id="people-notice" class="notice" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel conversation-panel" id="conversation-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">03 / IDŐVONAL</p>
+              <h2>Beszélgetésnézet</h2>
+              <p class="muted">Válasszon legalább két személyt; a résztvevői aliasokat az ügy személylistája fogja össze.</p>
+            </div>
+            <div class="conversation-actions">
+              <button id="conversation-eml-button" class="button quiet" type="button">EML ZIP + SHA-256</button>
+              <button id="conversation-pdf-button" class="button quiet" type="button">PDF / nyomtatás</button>
+            </div>
+          </div>
+          <div class="conversation-controls">
+            <fieldset class="person-selector">
+              <legend>Résztvevők</legend>
+              <div id="conversation-people" class="conversation-people empty-state">Előbb hozzon létre vagy rendeljen hozzá személyeket.</div>
+            </fieldset>
+            <div class="conversation-filter-grid">
+              <label class="field">
+                <span>Beszélgetés módja</span>
+                <select id="conversation-mode">
+                  <option value="between">Csak egymás között</option>
+                  <option value="shared">Közös levelek (másokkal együtt is)</option>
+                  <option value="any">Bármelyikük összes levele</option>
+                </select>
+              </label>
+              <label class="field"><span>Kezdete</span><input id="conversation-date-from" type="date"></label>
+              <label class="field"><span>Vége</span><input id="conversation-date-to" type="date"></label>
+              <label class="field">
+                <span>Téma / szál</span>
+                <select id="conversation-thread"><option value="">Minden téma</option></select>
+              </label>
+              <label class="field conversation-search">
+                <span>Keresés a beszélgetésben</span>
+                <input id="conversation-query" type="search" placeholder="Szó vagy kifejezés">
+              </label>
+              <label class="check-filter cc-bcc-filter"><input id="conversation-cc-bcc" type="checkbox" checked> CC/BCC résztvevők bevonása</label>
+              <button id="conversation-run-button" class="button primary" type="button">Beszélgetés betöltése</button>
+            </div>
+          </div>
+          <p id="conversation-notice" class="notice" role="status" aria-live="polite"></p>
+          <div id="conversation-results" class="conversation-results">
+            <div class="reader-empty">
+              <span class="reader-icon" aria-hidden="true">↔</span>
+              <h3>Válassza ki a résztvevőket</h3>
+              <p>Az üzenetek időrendben, személyenként színkódolva jelennek meg.</p>
+            </div>
+          </div>
+        </section>
+
         <section class="panel archive-panel" id="archive-panel">
           <div class="section-heading archive-heading">
             <div>
-              <p class="eyebrow">01 / VIZSGÁLAT</p>
+              <p class="eyebrow">02 / VIZSGÁLAT</p>
               <h2>Archívum böngésző</h2>
               <p class="muted">A lista indexelt adatokat mutat; a kiválasztott levél az ellenőrzött eredeti forrásból nyílik meg.</p>
             </div>
