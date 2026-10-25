@@ -6,6 +6,7 @@
     <meta name="author" content="Bálint Szabolcs">
     <meta name="description" content="Helyi levélarchívum-böngésző és elemző.">
     <title>Mail-Scope — levélarchívum</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
   </head>
@@ -13,8 +14,7 @@
     <div class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="/" aria-label="Mail-Scope kezdőlap">
-          <span class="brand-mark" aria-hidden="true">M</span>
-          <span><strong>MAIL-SCOPE</strong><small>offline archívum</small></span>
+          <img class="brand-logo" src="/assets/logo/png/mail-scope-logo-dark-bg.png" alt="Mail-Scope — levelezés-elemző">
         </a>
         <div class="sidebar-divider"></div>
         <p class="eyebrow">MUNKATERÜLET</p>
@@ -36,9 +36,12 @@
             <p class="eyebrow">MAIL-SCOPE <span id="app-version">0.1.0</span> / HELYI MUNKATERÜLET</p>
             <h1 id="page-title">Ügy és források</h1>
           </div>
-          <div class="case-summary">
-            <span class="status-light"></span>
-            <span id="case-label">Nincs megnyitott ügy</span>
+          <div class="topbar-actions">
+            <div class="case-summary">
+              <span class="status-light"></span>
+              <span id="case-label">Nincs megnyitott ügy</span>
+            </div>
+            <button id="shutdown-button" class="button danger" type="button">Leállítás</button>
           </div>
         </header>
 
@@ -57,6 +60,7 @@
               <span>Ügymappa teljes elérési útja</span>
               <input id="case-path" name="path" type="text" placeholder="Például: E:\Ügyek\2026-014" required>
             </label>
+            <button id="case-browse-button" class="button path-picker-button" type="button">Mappa tallózása</button>
             <button class="button primary" type="submit">Ügy megnyitása</button>
           </form>
 
@@ -66,6 +70,8 @@
                 <span>Postafiókfájl vagy bejárandó mappa</span>
                 <input id="source-path" name="path" type="text" placeholder="PST, OST, MBOX, EML vagy mappa elérési útja" required>
               </label>
+              <button id="source-file-browse-button" class="button path-picker-button" type="button">Fájl tallózása</button>
+              <button id="source-folder-browse-button" class="button path-picker-button" type="button">Mappa tallózása</button>
               <button id="discover-button" class="button secondary" type="submit">Források felismerése</button>
             </form>
             <div id="discovered-panel" class="discovered-panel hidden">

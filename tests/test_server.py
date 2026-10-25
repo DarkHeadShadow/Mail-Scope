@@ -13,10 +13,11 @@ from email import policy
 from email.message import EmailMessage
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from indexer import IndexDatabase, IndexingService, PersonDirectory
 from server import ApiError, MailScopeApplication, create_server
+from server.__main__ import main as run_server_main
 from sources.discover import discover_sources, sha256_file
 
 
@@ -141,10 +142,36 @@ class ServerTests(unittest.TestCase):
             hashlib.sha256(self.source_bytes + b"\n").hexdigest(),
         )
 
+    def test_shutdown_waits_for_the_active_indexing_checkpoint(self) -> None:
+        """Request cancellation and wait until the indexer has safely stopped."""
+        job = Mock()
+        job.wait.side_effect = (False, True)
+        self.application.job = job
+
+        self.assertTrue(self.application.stop_indexing_safely())
+
+        job.cancel.assert_called_once_with()
+        self.assertEqual(job.wait.call_args_list[0].args, (0,))
+        self.assertEqual(job.wait.call_args_list[1].args, ())
+
     def test_binds_only_to_loopback(self) -> None:
         """Reject attempts to expose this local mailbox API on a network interface."""
         with self.assertRaises(ValueError):
             create_server(host="0.0.0.0", port=8765)
+
+    def test_application_opens_the_actual_local_server_address(self) -> None:
+        """Open the browser automatically using the listener's actual port."""
+        http_server = Mock()
+        http_server.server_address = ("127.0.0.1", 43210)
+        with (
+            patch("sys.argv", ["mailscope", "--port", "0"]),
+            patch("server.__main__.create_server", return_value=http_server),
+            patch("server.__main__.webbrowser.open", return_value=True) as open_browser,
+        ):
+            run_server_main()
+
+        open_browser.assert_called_once_with("http://127.0.0.1:43210", new=2)
+        http_server.server_close.assert_called_once_with()
 
     def test_conversation_modes_dates_threads_and_activity(self) -> None:
         """Apply person modes, CC filtering, time range, thread, and text query."""
@@ -362,7 +389,38 @@ class ServerTests(unittest.TestCase):
         html = response.read().decode("utf-8")
         self.assertEqual(response.status, 200)
         self.assertIn("Mail-Scope", html)
+        self.assertIn('id="shutdown-button"', html)
+        self.assertIn('id="case-browse-button"', html)
+        self.assertIn('id="source-file-browse-button"', html)
+        self.assertIn('id="source-folder-browse-button"', html)
+        self.assertIn('href="/favicon.ico"', html)
+        self.assertIn('src="/assets/logo/png/mail-scope-logo-dark-bg.png"', html)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
+
+        for route, expected_type in (
+            ("/favicon.ico", "image/vnd.microsoft.icon"),
+            ("/assets/logo/png/mail-scope-logo-dark-bg.png", "image/png"),
+        ):
+            connection.request("GET", route)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), expected_type)
+            self.assertGreater(len(response.read()), 0)
+
+        with patch("server.app._browse_local_path", return_value=str(self.source_path)) as browse:
+            connection.request(
+                "POST",
+                "/api/browse",
+                body=json.dumps({"kind": "file", "initial_path": str(self.root)}),
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": f"http://127.0.0.1:{port}",
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["path"], str(self.source_path))
+            browse.assert_called_once_with("file", str(self.root))
 
         connection.request("GET", "/api/status", headers={"Host": f"localhost:{port}"})
         self.assertEqual(connection.getresponse().status, 403)
@@ -426,6 +484,84 @@ class ServerTests(unittest.TestCase):
         self.assertIn(".eml.zip", export_response.getheader("Content-Disposition"))
         with zipfile.ZipFile(BytesIO(export_response.read())) as export:
             self.assertEqual(export.namelist(), ["SHA256SUMS.txt"])
+
+    def test_shutdown_requires_confirmation_when_indexing_is_active(self) -> None:
+        """Require explicit confirmation before cancelling an active index job."""
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{port}",
+        }
+
+        with patch.object(
+            self.application,
+            "status",
+            return_value={"job": {"running": True}},
+        ), patch.object(http_server, "request_shutdown") as request_shutdown:
+            connection.request(
+                "POST",
+                "/api/shutdown",
+                body=json.dumps({"cancel_indexing": False}),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 409)
+            self.assertIn("Indexelés fut", json.loads(response.read())["error"])
+            request_shutdown.assert_not_called()
+
+            connection.request(
+                "POST",
+                "/api/shutdown",
+                body=json.dumps({"cancel_indexing": True}),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                json.loads(response.read()),
+                {"stopping": True, "indexing_was_running": True},
+            )
+            request_shutdown.assert_called_once_with()
+
+    def test_shutdown_endpoint_stops_the_local_server(self) -> None:
+        """Return the shutdown response before stopping the HTTP listener."""
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(
+            lambda: http_server.shutdown() if server_thread.is_alive() else None
+        )
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        connection.request(
+            "POST",
+            "/api/shutdown",
+            body=json.dumps({"cancel_indexing": False}),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": f"http://127.0.0.1:{port}",
+            },
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            json.loads(response.read()),
+            {"stopping": True, "indexing_was_running": False},
+        )
+
+        server_thread.join(timeout=3)
+        self.assertFalse(server_thread.is_alive())
 
     def test_detailed_search_label_and_saved_search_http_routes(self) -> None:
         """Exercise detailed-search, label, and saved-search endpoints over loopback."""

@@ -35,6 +35,70 @@ async function requestJson(path, options = {}) {
   return payload;
 }
 
+element("shutdown-button").addEventListener("click", shutdownApplication);
+
+/**
+ * Confirm the running-job state before safely stopping the local application.
+ */
+async function shutdownApplication() {
+  const button = element("shutdown-button");
+  button.disabled = true;
+  try {
+    const status = await requestJson("/api/status");
+    const indexing = Boolean(status.job && status.job.running);
+    const confirmationText = indexing
+      ? "Indexelés fut. A leállítás biztonságosan megszakítja a folyamatot, és az eddig mentett levelek megmaradnak, így később folytatható. Leállítja az alkalmazást?"
+      : "A Mail-Scope leáll. A már mentett ügyadatok és indexek a következő indításkor elérhetők. Biztosan leállítja?";
+    if (!window.confirm(confirmationText)) {
+      button.disabled = false;
+      return;
+    }
+    await requestJson("/api/shutdown", {
+      method: "POST",
+      body: JSON.stringify({ cancel_indexing: indexing }),
+    });
+    const shutdownScreen = document.createElement("main");
+    shutdownScreen.className = "shutdown-screen";
+    shutdownScreen.setAttribute("role", "status");
+    const title = document.createElement("h1");
+    title.textContent = "A Mail-Scope leállítása";
+    const detail = document.createElement("p");
+    detail.textContent = indexing
+      ? "Az indexelés biztonságosan megáll az aktuális mentési pontnál. Az eddig elmentett állapot megmarad; a böngészőfül bezárható."
+      : "A mentett ügyadatok megmaradnak. A böngészőfül bezárható.";
+    shutdownScreen.append(title, detail);
+    document.body.replaceChildren(shutdownScreen);
+  } catch (error) {
+    showNotice(error.message, true);
+    button.disabled = false;
+  }
+}
+
+/**
+ * Open a native local path picker and preserve the current value on cancel.
+ */
+async function browsePath(kind, inputId, buttonIds) {
+  const buttons = buttonIds.map((id) => element(id));
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const result = await requestJson("/api/browse", {
+      method: "POST",
+      body: JSON.stringify({
+        kind,
+        initial_path: element(inputId).value.trim(),
+      }),
+    });
+    if (result.path) {
+      element(inputId).value = result.path;
+      showNotice("Az útvonal kiválasztva.");
+    }
+  } catch (error) {
+    showNotice(error.message, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
 /**
  * Show a visible success or error message in the current workspace.
  */
@@ -1111,6 +1175,16 @@ element("discover-form").addEventListener("submit", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+element("case-browse-button").addEventListener("click", () => {
+  browsePath("directory", "case-path", ["case-browse-button"]);
+});
+element("source-file-browse-button").addEventListener("click", () => {
+  browsePath("file", "source-path", ["source-file-browse-button", "source-folder-browse-button"]);
+});
+element("source-folder-browse-button").addEventListener("click", () => {
+  browsePath("directory", "source-path", ["source-file-browse-button", "source-folder-browse-button"]);
 });
 
 /**

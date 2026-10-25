@@ -158,8 +158,8 @@ a GitHubra. Javasolt név: `DarkHeadShadow/Mail-Scope`, először privátként.
   `requirements-build.txt` (PyInstaller), lehetőleg pontos verziókkal.
 - **Fejlesztői környezet:** `.vscode/` (launch, tasks: venv létrehozása, tesztek, build),
   `run_dev.bat`, `build_windows.bat` a Mail Extractor mintájára.
-- **CI:** GitHub Actions munkafolyamat (`.github/workflows/tests.yml`) Windows futtatóval,
-  Python 3.13-mal: tesztek minden push és pull request esetén; címkézett verziónál
-  (`v*`) PyInstaller build és a ZIP-elt `dist\Mail-Scope` csatolása a GitHub Release-hez.
+- **CI:** Elkészült a `.github/workflows/tests.yml` Windows futtatóval és Python 3.13-mal:
+  tesztek minden `main` push és pull request esetén; címkézett verziónál (`v*`) PyInstaller
+  build és a ZIP-elt `dist\Mail-Scope` csatolása a GitHub Release-hez.
 - **Ellenőrzőlista a feltöltés előtt:** minden teszt zöld, a build lefut, a README naprakész,
   a `git status` tiszta, nincs nagy bináris vagy valós adat a commitokban.

@@ -35,8 +35,55 @@ from version import __version__
 
 logger = logging.getLogger(__name__)
 _UI_DIRECTORY = Path(__file__).resolve().parent.parent / "ui"
+_LOGO_DIRECTORY = Path(__file__).resolve().parent.parent / "assets" / "logo"
+_STATIC_ASSETS = {
+    "/favicon.ico": (_LOGO_DIRECTORY / "mail-scope.ico", "image/vnd.microsoft.icon"),
+    "/assets/logo/png/mail-scope-logo-dark-bg.png": (
+        _LOGO_DIRECTORY / "png" / "mail-scope-logo-dark-bg.png",
+        "image/png",
+    ),
+}
 _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
+
+
+def _browse_local_path(kind: str, initial_path: str) -> str:
+    """Show a native Windows picker for a directory or a supported mail file."""
+    from tkinter import Tk, filedialog
+
+    if kind not in {"directory", "file"}:
+        raise ValueError("A tallózás típusa directory vagy file legyen.")
+
+    initial_directory = ""
+    if initial_path:
+        candidate = Path(initial_path).expanduser()
+        if not candidate.is_dir():
+            candidate = candidate.parent
+        if candidate.is_dir():
+            initial_directory = str(candidate)
+
+    root = Tk()
+    root.withdraw()
+    try:
+        root.update()
+        if kind == "directory":
+            return filedialog.askdirectory(
+                parent=root,
+                title="Mappa kiválasztása",
+                initialdir=initial_directory or None,
+                mustexist=True,
+            )
+        return filedialog.askopenfilename(
+            parent=root,
+            title="Levelezési fájl kiválasztása",
+            initialdir=initial_directory or None,
+            filetypes=(
+                ("Támogatott levelezési fájlok", "*.pst *.ost *.mbox *.mbx *.mbs *.eml"),
+                ("Minden fájl", "*"),
+            ),
+        )
+    finally:
+        root.destroy()
 
 
 class ApiError(Exception):
@@ -122,6 +169,17 @@ class MailScopeApplication:
                 raise ApiError(HTTPStatus.CONFLICT, "Nincs futó indexelési feladat.")
             self.job.cancel()
             return self.status()
+
+    def stop_indexing_safely(self) -> bool:
+        """Cancel active indexing and wait for its committed checkpoint."""
+        with self._lock:
+            job = self.job
+            is_running = job is not None and not job.wait(0)
+            if is_running:
+                job.cancel()
+        if is_running and job is not None:
+            job.wait()
+        return is_running
 
     def status(self) -> dict[str, Any]:
         """Return case, source, message-count, and job progress information."""
@@ -681,7 +739,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         request = urlsplit(self.path)
         try:
-            if request.path in {"/", "/index.html", "/app.js", "/styles.css"}:
+            if request.path in {
+                "/",
+                "/index.html",
+                "/app.js",
+                "/styles.css",
+                *_STATIC_ASSETS,
+            }:
                 self._serve_ui(request.path)
             elif request.path == "/api/status":
                 self._send_json(HTTPStatus.OK, self.server.application.status())
@@ -749,7 +813,31 @@ class _RequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             path = urlsplit(self.path).path
-            if path == "/api/case":
+            if path == "/api/browse":
+                kind = _required_string(payload, "kind")
+                initial_path = payload.get("initial_path", "")
+                if not isinstance(initial_path, str):
+                    raise ValueError("Az initial_path mező szöveges útvonal legyen.")
+                response = {"path": _browse_local_path(kind, initial_path)}
+            elif path == "/api/shutdown":
+                cancel_indexing = payload.get("cancel_indexing", False)
+                if not isinstance(cancel_indexing, bool):
+                    raise ValueError("A cancel_indexing mező logikai érték legyen.")
+                status = self.server.application.status()
+                job = status["job"]
+                is_indexing = bool(job and job["running"])
+                if is_indexing and not cancel_indexing:
+                    raise ApiError(
+                        HTTPStatus.CONFLICT,
+                        "Indexelés fut. A leállításhoz erősítse meg a biztonságos megszakítást.",
+                    )
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"stopping": True, "indexing_was_running": is_indexing},
+                )
+                self.server.request_shutdown()
+                return
+            elif path == "/api/case":
                 response = self.server.application.select_case(_required_string(payload, "path"))
             elif path == "/api/people":
                 display_name = _required_string(payload, "display_name")
@@ -992,10 +1080,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
         return origin is None or origin == expected_origin
 
     def _serve_ui(self, route: str) -> None:
-        """Serve only the three known local UI assets with restrictive headers."""
-        file_name = "index.html" if route in {"/", "/index.html"} else route.removeprefix("/")
-        file_path = _UI_DIRECTORY / file_name
-        content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+        """Serve only explicitly mapped UI and logo assets with restrictive headers."""
+        if route in _STATIC_ASSETS:
+            file_path, content_type = _STATIC_ASSETS[route]
+        else:
+            file_name = "index.html" if route in {"/", "/index.html"} else route.removeprefix("/")
+            file_path = _UI_DIRECTORY / file_name
+            content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
         self._send_bytes(HTTPStatus.OK, file_path.read_bytes(), content_type)
 
     def _send_json(self, status: HTTPStatus, payload: Any) -> None:
@@ -1034,7 +1125,27 @@ class _MailScopeHttpServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], application: MailScopeApplication) -> None:
         """Keep the application context available to each request handler."""
         self.application = application
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_requested = False
         super().__init__(server_address, _RequestHandler)
+
+    def request_shutdown(self) -> bool:
+        """Stop indexing safely before shutting down the local HTTP listener."""
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                return False
+            self._shutdown_requested = True
+        threading.Thread(
+            target=self._finish_shutdown,
+            name="Mail-Scope shutdown",
+            daemon=True,
+        ).start()
+        return True
+
+    def _finish_shutdown(self) -> None:
+        """Wait for the active indexing checkpoint, then stop serving requests."""
+        self.application.stop_indexing_safely()
+        self.shutdown()
 
 
 def create_server(

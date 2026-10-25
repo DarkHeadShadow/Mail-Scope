@@ -43,7 +43,7 @@ py -3.13 -m venv .venv
 .\run_dev.bat
 ```
 
-Open the local address printed in the console (by default `http://127.0.0.1:8765`). Stop the server with `Ctrl+C`.
+The UI opens automatically in the default browser (by default `http://127.0.0.1:8765`). When running from source, stop the server with `Ctrl+C` in the terminal.
 
 To run the tests:
 
@@ -62,6 +62,8 @@ build_windows.bat
 
 The executable is `dist\Mail-Scope\Mail-Scope.exe`. Keep the complete `Mail-Scope` folder when running it; it contains the local UI and third-party notices. The build requires the pinned PST binding to be installed and collected by PyInstaller.
 
+The executable opens the local UI in the default browser automatically and runs without a terminal window. Use the **Leállítás** button in the upper-right corner to stop Mail-Scope. If indexing is active, the app asks for confirmation, cancels at a safe checkpoint, and keeps the SQLite index so indexing can resume on the next launch.
+
 ## Use
 
 1. Start Mail-Scope and open or create a case directory.
@@ -78,7 +80,7 @@ Detailed search supports subject, full-text, sender, recipient, inclusive date b
 - Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source.
 - A PDF is produced through the browser's print dialog, not by a bundled PDF library.
 - Search and export limits are enforced to keep local responses bounded.
-- Project-level license selection, release packaging, CI, and public-release preparation remain pending.
+- Project-level license selection and public-release preparation remain pending.
 
 ## Third-party notices
 

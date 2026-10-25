@@ -43,7 +43,7 @@ py -3.13 -m venv .venv
 .\run_dev.bat
 ```
 
-Nyissa meg a konzolban megjelenő helyi címet (alapértelmezésben `http://127.0.0.1:8765`). A szerver leállítása: `Ctrl+C`.
+A felület automatikusan megnyílik az alapértelmezett böngészőben (alapértelmezésben `http://127.0.0.1:8765`). Forrásból futtatva a szerver leállítható a terminálban a `Ctrl+C` billentyűkkel.
 
 Tesztek futtatása:
 
@@ -62,6 +62,8 @@ build_windows.bat
 
 A futtatható fájl: `dist\Mail-Scope\Mail-Scope.exe`. Futtatáskor a teljes `Mail-Scope` mappát tartsa meg, mert a helyi felület és a harmadik fél licenceiről szóló tájékoztatók is abban vannak. A buildhez szükséges a rögzített PST-kötés, amelyet a PyInstaller csomagol.
 
+Az `.exe` indításakor a program automatikusan megnyitja a helyi felületet az alapértelmezett böngészőben; terminálablak nem jelenik meg. A felület jobb felső sarkában található **Leállítás** gomb megerősítést kér. Futó indexelés esetén jelzi ezt, majd biztonságosan megszakítja az aktuális mentési pontnál. A már elmentett levelek és a folytatáshoz szükséges indexállapot megmarad az ügy `.mailscope` adatbázisában.
+
 ## Használat
 
 1. Indítsa el a Mail-Scope-ot, majd nyisson meg vagy hozzon létre egy ügyet.
@@ -78,7 +80,7 @@ A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró d
 - A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.
-- A projektlicenc kiválasztása, kiadási csomagolás, CI és nyilvános közzététel előkészítése még hátravan.
+- A projektlicenc kiválasztása és a nyilvános közzététel előkészítése még hátravan.
 
 ## Harmadik féltől származó összetevők
 
