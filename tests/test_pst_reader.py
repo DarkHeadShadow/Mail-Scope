@@ -1,3 +1,5 @@
+__author__ = "Bálint Szabolcs"
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -91,12 +93,14 @@ class FakeAttachment:
         """Return the attachment byte length."""
         return len(b"csak tesztadat")
 
-    def seek_offset(self, _offset: int, _whence: int) -> None:
+    def seek_offset(self, offset: int, whence: int) -> None:
         """Accept the requested attachment seek."""
+        self.offset = offset
+        self.whence = whence
 
-    def read_buffer(self, _size: int) -> bytes:
+    def read_buffer(self, size: int) -> bytes:
         """Return synthetic attachment bytes."""
-        return b"csak tesztadat"
+        return b"csak tesztadat"[:size]
 
     def get_number_of_record_sets(self) -> int:
         """Report attachment metadata properties."""
@@ -155,8 +159,9 @@ class FakeRoot:
 class FakeStore:
     """Represent a short-lived read-only libpff file handle."""
 
-    def open(self, _path: str) -> None:
+    def open(self, path: str) -> None:
         """Accept the path passed by the reader."""
+        self.path = path
 
     def close(self) -> None:
         """Close the synthetic file handle."""
@@ -176,6 +181,9 @@ class PstReaderTests(unittest.TestCase):
 
             folders = reader.iter_folders()
             metadata = list(reader.iter_messages())[0]
+            resumed = list(
+                reader.iter_messages(after_locator=metadata.locator)
+            )
             message = reader.open_message(metadata.locator)
             attachment = reader.open_attachment(metadata.locator, 0)
 
@@ -185,6 +193,8 @@ class PstReaderTests(unittest.TestCase):
             self.assertEqual(metadata.recipient_addresses, ("anna@pelda.hu",))
             self.assertEqual(metadata.message_id, "<pst@example.test>")
             self.assertEqual(metadata.attachment_names, ("minta.txt",))
+            self.assertEqual(metadata.attachment_content_types, ("text/plain",))
+            self.assertEqual(resumed, [])
             self.assertEqual(message["To"], "Teszt Anna <anna@pelda.hu>")
             self.assertEqual(message.get_content(), "Kitalált tartalom.\n")
             self.assertEqual(attachment.filename, "minta.txt")

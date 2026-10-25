@@ -1,3 +1,5 @@
+__author__ = "Bálint Szabolcs"
+
 import hashlib
 import tempfile
 import unittest

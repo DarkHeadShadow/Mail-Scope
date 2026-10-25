@@ -1,5 +1,7 @@
 """Construct the source reader that matches a discovered source."""
 
+__author__ = "Bálint Szabolcs"
+
 from .discover import DiscoveredSource
 from .eml_reader import EmlReader
 from .mbox_reader import MboxReader

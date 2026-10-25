@@ -1,5 +1,7 @@
 """Content-based discovery for supported mailbox files."""
 
+__author__ = "Bálint Szabolcs"
+
 import hashlib
 import re
 from dataclasses import dataclass
@@ -41,7 +43,7 @@ def discover_sources(path: str | Path) -> list[DiscoveredSource]:
                     path=candidate,
                     kind=kind,
                     size=candidate.stat().st_size,
-                    sha256=_sha256(candidate),
+                    sha256=sha256_file(candidate),
                     folder=_folder_path(candidate, root, kind),
                 )
             )
@@ -62,10 +64,10 @@ def _detect_kind(path: Path) -> str | None:
     return None
 
 
-def _sha256(path: Path) -> str:
-    """Hash a source in bounded memory without writing to it."""
+def sha256_file(path: str | Path) -> str:
+    """Hash a file in bounded memory without writing to it."""
     digest = hashlib.sha256()
-    with path.open("rb") as source:
+    with Path(path).open("rb") as source:
         while chunk := source.read(HASH_CHUNK_SIZE):
             digest.update(chunk)
     return digest.hexdigest()

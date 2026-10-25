@@ -1,14 +1,17 @@
 """Read PST and OST files through the optional libpff Python bindings."""
 
+__author__ = "Bálint Szabolcs"
+
+import importlib
 import logging
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses
 from pathlib import Path
 from typing import Iterator, Any
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
+from .content import message_addresses, message_body_text
 
 
 ITEM_TYPE_TAG = 0x001A
@@ -39,7 +42,7 @@ class PstReader:
         if not self.path.is_file():
             raise FileNotFoundError(self.path)
         try:
-            import pypff
+            pypff = importlib.import_module("pypff")
         except ImportError as error:
             raise RuntimeError(
                 "PST/OST olvasásához telepítse a libpff pypff kötését."
@@ -58,17 +61,42 @@ class PstReader:
             store.close()
 
     def iter_messages(
-        self, folder: str | None = None
+        self,
+        folder: str | None = None,
+        after_locator: MessageLocator | None = None,
     ) -> Iterator[MessageMetadata]:
         """Yield message metadata with stable folder and item locators."""
         store = self._open_store()
         try:
-            for folder_path, folder_object in self._folders(
-                store.get_root_folder()
-            ):
+            folders = list(self._folders(store.get_root_folder()))
+            resume_folder_index = 0
+            first_item_index = 0
+            if after_locator is not None:
+                if after_locator.folder_path is None:
+                    raise ValueError("PST/OST resume locator has no folder path")
+                folder_paths = [folder_path for folder_path, _ in folders]
+                if after_locator.folder_path not in folder_paths:
+                    raise ValueError(
+                        f"Outlook resume folder no longer exists: "
+                        f"{after_locator.folder_path}"
+                    )
+                resume_folder_index = folder_paths.index(after_locator.folder_path)
+                if after_locator.item_index is not None:
+                    first_item_index = after_locator.item_index + 1
+
+            for folder_position, (folder_path, folder_object) in enumerate(folders):
+                if folder_position < resume_folder_index:
+                    continue
                 if folder is not None and folder != folder_path:
                     continue
-                for item_index in range(folder_object.get_number_of_sub_messages()):
+                folder_first_item = (
+                    first_item_index
+                    if folder_position == resume_folder_index
+                    else 0
+                )
+                for item_index in range(
+                    folder_first_item, folder_object.get_number_of_sub_messages()
+                ):
                     try:
                         item = folder_object.get_sub_message(item_index)
                         locator = MessageLocator(
@@ -102,7 +130,9 @@ class PstReader:
                             folder=folder_path,
                             subject="",
                             from_addresses=(),
-                            recipient_addresses=(),
+                            to_addresses=(),
+                            cc_addresses=(),
+                            bcc_addresses=(),
                             date=None,
                             message_id=None,
                             in_reply_to=None,
@@ -210,36 +240,19 @@ class PstReader:
     ) -> MessageMetadata:
         """Normalize an Outlook item while retaining its original headers."""
         message = self._as_email_message(item)
-        from_addresses = tuple(
-            address
-            for _, address in getaddresses(message.get_all("From", []))
-            if address
-        )
-        header_recipient_addresses = tuple(
-            address
-            for _, address in getaddresses(
-                message.get_all("To", [])
-                + message.get_all("Cc", [])
-                + message.get_all("Bcc", [])
-            )
-            if address
-        )
+        from_addresses = message_addresses(message, "From")
+        to_addresses = message_addresses(message, "To")
+        cc_addresses = message_addresses(message, "Cc")
+        bcc_addresses = message_addresses(message, "Bcc")
+        header_recipient_addresses = to_addresses + cc_addresses + bcc_addresses
         mapi_recipients = _mapi_recipients(item)
         if not header_recipient_addresses:
             for header, values in mapi_recipients.items():
                 if values:
                     message[header] = ", ".join(values)
-        recipient_addresses = header_recipient_addresses or tuple(
-            address
-            for _, address in getaddresses(
-                [
-                    ("", value)
-                    for values in mapi_recipients.values()
-                    for value in values
-                ]
-            )
-            if address
-        )
+            to_addresses = message_addresses(message, "To")
+            cc_addresses = message_addresses(message, "Cc")
+            bcc_addresses = message_addresses(message, "Bcc")
         message_class = _record_string(item, ITEM_TYPE_TAG).upper()
         item_type = next(
             (
@@ -254,13 +267,17 @@ class PstReader:
             folder=folder,
             subject=str(message.get("Subject", "")),
             from_addresses=from_addresses,
-            recipient_addresses=recipient_addresses,
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses,
+            bcc_addresses=bcc_addresses,
             date=message.get("Date"),
             message_id=message.get("Message-ID"),
             in_reply_to=message.get("In-Reply-To"),
             references=message.get("References"),
             attachment_names=_attachment_names(item),
             item_type=item_type,
+            text_body=message_body_text(message),
+            attachment_content_types=_attachment_types(item),
         )
 
     @staticmethod
@@ -418,6 +435,28 @@ def _attachment_names(item: Any) -> tuple[str, ...]:
             logger.warning("Unable to read PST/OST attachment %d: %s", index, error)
             names.append(f"attachment-{index + 1}")
     return tuple(names)
+
+
+def _attachment_types(item: Any) -> tuple[str, ...]:
+    """Read attachment MIME metadata without loading any attachment content."""
+    content_types: list[str] = []
+    for index in range(item.get_number_of_attachments()):
+        try:
+            attachment = item.get_attachment(index)
+            content_type = (
+                _record_string(attachment, ATTACH_CONTENT_TYPE_TAG)
+                or _optional_text(attachment, "content_type")
+                or "application/octet-stream"
+            )
+            content_types.append(content_type)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as error:
+            logger.warning(
+                "Unable to read PST/OST attachment MIME type %d: %s",
+                index,
+                error,
+            )
+            content_types.append("application/octet-stream")
+    return tuple(content_types)
 
 
 def _optional_text_value(value: Any) -> str:

@@ -1,5 +1,7 @@
 """Read-only source readers for Mail-Scope."""
 
+__author__ = "Bálint Szabolcs"
+
 from .mbox_reader import MboxReader
 from .eml_reader import EmlReader
 from .pst_reader import PstReader

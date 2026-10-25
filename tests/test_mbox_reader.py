@@ -1,3 +1,5 @@
+__author__ = "Bálint Szabolcs"
+
 import tempfile
 import unittest
 from email import policy
@@ -17,6 +19,8 @@ class MboxReaderTests(unittest.TestCase):
                 "From sender1@example.test Sat Jan  1 00:00:00 2022\n"
                 "From: Teszt Antal <antal@pelda.hu>\n"
                 "To: Teszt Anna <anna@pelda.hu>\n"
+                "Cc: Teszt Béla <bela@pelda.hu>\n"
+                "Bcc: Teszt Csilla <csilla@pelda.hu>\n"
                 "Subject: Első levél\n"
                 "Message-ID: <one@example.test>\n"
                 "X-Gmail-Labels: Fontos, Munka\n"
@@ -43,7 +47,14 @@ class MboxReaderTests(unittest.TestCase):
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0].subject, "Első levél")
         self.assertEqual(messages[0].from_addresses, ("antal@pelda.hu",))
-        self.assertEqual(messages[0].recipient_addresses, ("anna@pelda.hu",))
+        self.assertEqual(
+            messages[0].recipient_addresses,
+            ("anna@pelda.hu", "bela@pelda.hu", "csilla@pelda.hu"),
+        )
+        self.assertEqual(messages[0].cc_addresses, ("bela@pelda.hu",))
+        self.assertEqual(messages[0].bcc_addresses, ("csilla@pelda.hu",))
+        self.assertEqual(messages[0].attachment_content_types, ())
+        self.assertIn("Szia Anna!", messages[0].text_body)
         self.assertEqual(messages[0].labels, ("Fontos", "Munka"))
         self.assertTrue(messages[0].deleted)
         self.assertEqual(messages[1].in_reply_to, "<one@example.test>")

@@ -1,5 +1,7 @@
 """Shared models for source readers."""
 
+__author__ = "Bálint Szabolcs"
+
 from dataclasses import dataclass
 from email.message import EmailMessage
 from pathlib import Path
@@ -8,7 +10,7 @@ from typing import Iterator, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class MessageLocator:
-    """A byte range in the original source file."""
+    """A stable position in an original file or folder-based mailbox store."""
 
     offset: int
     length: int
@@ -42,16 +44,25 @@ class MessageMetadata:
     folder: str
     subject: str
     from_addresses: tuple[str, ...]
-    recipient_addresses: tuple[str, ...]
+    to_addresses: tuple[str, ...]
+    cc_addresses: tuple[str, ...]
+    bcc_addresses: tuple[str, ...]
     date: str | None
     message_id: str | None
     in_reply_to: str | None
     references: str | None
     attachment_names: tuple[str, ...]
+    text_body: str = ""
+    attachment_content_types: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
     deleted: bool = False
     item_type: str = "mail"
     error: str | None = None
+
+    @property
+    def recipient_addresses(self) -> tuple[str, ...]:
+        """Return all recipient addresses while preserving the To/Cc/Bcc roles."""
+        return self.to_addresses + self.cc_addresses + self.bcc_addresses
 
 
 @runtime_checkable
@@ -63,7 +74,9 @@ class SourceReader(Protocol):
     def iter_folders(self) -> list[FolderInfo]: ...
 
     def iter_messages(
-        self, folder: str | None = None
+        self,
+        folder: str | None = None,
+        after_locator: MessageLocator | None = None,
     ) -> Iterator[MessageMetadata]: ...
 
     def open_message(self, locator: MessageLocator) -> EmailMessage: ...

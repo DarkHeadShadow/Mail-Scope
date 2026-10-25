@@ -1,3 +1,5 @@
+Project creator: Bálint Szabolcs
+
 PST/OST support uses the unmodified pypff Python bindings for libpff,
 provided by the libpff-python-windows package and loaded as a separate
 dynamic module.

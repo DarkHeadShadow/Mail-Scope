@@ -1,3 +1,4 @@
+# Project creator: Bálint Szabolcs
 .venv/
 __pycache__/
 *.py[cod]

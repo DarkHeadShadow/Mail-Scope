@@ -1,5 +1,7 @@
 # Mail-Scope – levélnéző elemzőknek
 
+Készítő: **Bálint Szabolcs**
+
 A Mail-Scope önálló levélnéző és -elemző program. **Közvetlenül olvassa be a postafiókfájlokat**
 (Outlook PST/OST, MBOX) és az ilyeneket tartalmazó mappákat, nem kell előtte semmit kibontani.
 Böngészni, keresni és elemezni lehet vele a leveleket. A fő újdonság a **beszélgetés-nézet**:
@@ -24,6 +26,9 @@ Képernyőtervek: https://claude.ai/artifact/Uoqja3me1AtgpwW81isiqW
 - **Offline.** Nincs hálózati kapcsolat, nincs külső CDN, minden helyben fut.
 - **Windows 10/11 x64, Python 3.13**, PyInstallerrel buildelhető.
 - A felület nyelve magyar.
+- Minden Python forrás- és tesztmodul tartalmazza a
+  `__author__ = "Bálint Szabolcs"` szerzői metaadatot; a dokumentáció és a
+  felhasználónak látható részek is tüntessék fel a készítőt.
 
 ## Bemenet
 Egy **ügy** több forrásból állhat (pl. Antal PST-je + Anna MBOX-a + Béla OST-je).
@@ -96,9 +101,9 @@ Forrás lehet:
    - „Megnyitás beszélgetés-nézetben”.
 
 ## Mérföldkövek
-1. Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),
+1. [x] Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),
    forrásfelismerés, tesztek kis mintafájlokkal a `tests/` alatt.
-2. Indexelő + SQLite séma + FTS5, háttérindexelés, folytatás, forrás-hash ellenőrzés.
+2. [x] Indexelő + SQLite séma + FTS5, háttérindexelés, folytatás, forrás-hash ellenőrzés.
 3. Személyek és címek összevonása, duplikátumok, szálak.
 4. Helyi szerver + Ügy és források képernyő + Archívum böngésző.
 5. Beszélgetés-nézet.

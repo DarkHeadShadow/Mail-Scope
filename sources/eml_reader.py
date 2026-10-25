@@ -1,14 +1,16 @@
 """Read individual RFC 5322 EML files without changing the source."""
 
+__author__ = "Bálint Szabolcs"
+
 import logging
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses
 from pathlib import Path
 from typing import Iterator
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
+from .content import message_addresses, message_body_text
 
 
 logger = logging.getLogger(__name__)
@@ -32,11 +34,16 @@ class EmlReader:
         return [FolderInfo(path=name, name=name)]
 
     def iter_messages(
-        self, folder: str | None = None
+        self,
+        folder: str | None = None,
+        after_locator: MessageLocator | None = None,
     ) -> Iterator[MessageMetadata]:
         """Yield EML metadata, reporting parse and file errors per message."""
         folder_info = self.iter_folders()[0]
-        if folder is not None and folder != folder_info.path:
+        if (
+            (folder is not None and folder != folder_info.path)
+            or after_locator is not None
+        ):
             return
 
         try:
@@ -50,7 +57,9 @@ class EmlReader:
                 folder=folder_info.path,
                 subject="",
                 from_addresses=(),
-                recipient_addresses=(),
+                to_addresses=(),
+                cc_addresses=(),
+                bcc_addresses=(),
                 date=None,
                 message_id=None,
                 in_reply_to=None,
@@ -96,26 +105,18 @@ class EmlReader:
         message: EmailMessage, locator: MessageLocator, folder: str
     ) -> MessageMetadata:
         """Build normalized search metadata from the parsed EML headers."""
-        from_addresses = tuple(
-            address
-            for _, address in getaddresses(message.get_all("From", []))
-            if address
-        )
-        recipient_addresses = tuple(
-            address
-            for _, address in getaddresses(
-                message.get_all("To", [])
-                + message.get_all("Cc", [])
-                + message.get_all("Bcc", [])
-            )
-            if address
-        )
+        from_addresses = message_addresses(message, "From")
+        to_addresses = _addresses(message, "To")
+        cc_addresses = _addresses(message, "Cc")
+        bcc_addresses = _addresses(message, "Bcc")
         return MessageMetadata(
             locator=locator,
             folder=folder,
             subject=str(message.get("Subject", "")),
             from_addresses=from_addresses,
-            recipient_addresses=recipient_addresses,
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses,
+            bcc_addresses=bcc_addresses,
             date=message.get("Date"),
             message_id=message.get("Message-ID"),
             in_reply_to=message.get("In-Reply-To"),
@@ -126,4 +127,16 @@ class EmlReader:
                 if part.get_content_disposition() == "attachment"
                 or part.get_filename()
             ),
+            text_body=message_body_text(message),
+            attachment_content_types=tuple(
+                part.get_content_type()
+                for part in message.walk()
+                if part.get_content_disposition() == "attachment"
+                or part.get_filename()
+            ),
         )
+
+
+def _addresses(message: EmailMessage, header: str) -> tuple[str, ...]:
+    """Extract mailbox addresses from one recipient header."""
+    return message_addresses(message, header)

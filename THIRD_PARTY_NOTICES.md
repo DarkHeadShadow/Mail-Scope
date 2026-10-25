@@ -1,5 +1,7 @@
 # Third-party notices
 
+Project creator: Bálint Szabolcs
+
 ## libpff / pypff
 
 PST/OST support uses the unmodified `pypff` bindings from

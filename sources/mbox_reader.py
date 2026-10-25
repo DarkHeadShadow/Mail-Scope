@@ -1,15 +1,17 @@
 """Read-only MBOX reader with byte-range locators."""
 
+__author__ = "Bálint Szabolcs"
+
 import csv
 import logging
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses
 from pathlib import Path
 from typing import Iterator
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
+from .content import message_addresses, message_body_text
 
 
 logger = logging.getLogger(__name__)
@@ -33,13 +35,15 @@ class MboxReader:
         return [FolderInfo(path=name, name=name)]
 
     def iter_messages(
-        self, folder: str | None = None
+        self,
+        folder: str | None = None,
+        after_locator: MessageLocator | None = None,
     ) -> Iterator[MessageMetadata]:
         folder_info = self.iter_folders()[0]
         if folder is not None and folder != folder_info.path:
             return
 
-        for locator in self._message_ranges():
+        for locator in self._message_ranges(after_locator):
             try:
                 message = self._parse_message(locator)
                 yield self._metadata(message, locator, folder_info.path)
@@ -55,7 +59,9 @@ class MboxReader:
                     folder=folder_info.path,
                     subject="",
                     from_addresses=(),
-                    recipient_addresses=(),
+                    to_addresses=(),
+                    cc_addresses=(),
+                    bcc_addresses=(),
                     date=None,
                     message_id=None,
                     in_reply_to=None,
@@ -89,10 +95,14 @@ class MboxReader:
                 )
         raise IndexError(f"No attachment at index {index}")
 
-    def _message_ranges(self) -> Iterator[MessageLocator]:
+    def _message_ranges(
+        self, after_locator: MessageLocator | None = None
+    ) -> Iterator[MessageLocator]:
         """Locate envelope lines and derive message byte ranges."""
         starts: list[int] = []
         with self.path.open("rb") as source:
+            if after_locator is not None:
+                source.seek(after_locator.offset + after_locator.length)
             while True:
                 offset = source.tell()
                 line = source.readline()
@@ -130,20 +140,10 @@ class MboxReader:
         message: EmailMessage, locator: MessageLocator, folder: str
     ) -> MessageMetadata:
         """Normalize message headers into indexable metadata."""
-        from_addresses = tuple(
-            address
-            for _, address in getaddresses(message.get_all("From", []))
-            if address
-        )
-        recipient_addresses = tuple(
-            address
-            for _, address in getaddresses(
-                message.get_all("To", [])
-                + message.get_all("Cc", [])
-                + message.get_all("Bcc", [])
-            )
-            if address
-        )
+        from_addresses = message_addresses(message, "From")
+        to_addresses = MboxReader._addresses(message, "To")
+        cc_addresses = MboxReader._addresses(message, "Cc")
+        bcc_addresses = MboxReader._addresses(message, "Bcc")
         status = (message.get("X-Mozilla-Status") or "").strip()
         try:
             deleted = bool(int(status, 16) & 0x0008)
@@ -155,7 +155,9 @@ class MboxReader:
             folder=folder,
             subject=str(message.get("Subject", "")),
             from_addresses=from_addresses,
-            recipient_addresses=recipient_addresses,
+            to_addresses=to_addresses,
+            cc_addresses=cc_addresses,
+            bcc_addresses=bcc_addresses,
             date=message.get("Date"),
             message_id=message.get("Message-ID"),
             in_reply_to=message.get("In-Reply-To"),
@@ -166,9 +168,21 @@ class MboxReader:
                 if part.get_content_disposition() == "attachment"
                 or part.get_filename()
             ),
+            attachment_content_types=tuple(
+                part.get_content_type()
+                for part in message.walk()
+                if part.get_content_disposition() == "attachment"
+                or part.get_filename()
+            ),
             labels=MboxReader._gmail_labels(message),
             deleted=deleted,
+            text_body=message_body_text(message),
         )
+
+    @staticmethod
+    def _addresses(message: EmailMessage, header: str) -> tuple[str, ...]:
+        """Extract mailbox addresses from one recipient header."""
+        return message_addresses(message, header)
 
     @staticmethod
     def _gmail_labels(message: EmailMessage) -> tuple[str, ...]:

@@ -1,3 +1,5 @@
+__author__ = "Bálint Szabolcs"
+
 import tempfile
 import unittest
 from email import policy
@@ -8,6 +10,29 @@ from sources.eml_reader import EmlReader
 
 
 class EmlReaderTests(unittest.TestCase):
+    def test_extracts_visible_search_text_from_html_body(self) -> None:
+        """Index HTML text but omit hidden head, script, and style content."""
+        message = EmailMessage()
+        message["From"] = "antal@pelda.hu"
+        message["Subject"] = "HTML"
+        message.set_content(
+            "<html><head><title>Rejtett cím</title></head>"
+            "<body><p>Látható tartalom</p>"
+            "<script>rejtett script</script>"
+            "<style>rejtett stílus</style></body></html>",
+            subtype="html",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "html.eml"
+            path.write_bytes(message.as_bytes(policy=policy.SMTP))
+            metadata = list(EmlReader(path).iter_messages())[0]
+
+        self.assertIn("Látható tartalom", metadata.text_body)
+        self.assertNotIn("Rejtett cím", metadata.text_body)
+        self.assertNotIn("rejtett script", metadata.text_body)
+        self.assertNotIn("rejtett stílus", metadata.text_body)
+
     def test_reads_headers_and_opens_attachment_on_demand(self) -> None:
         message = EmailMessage()
         message["From"] = "Teszt Antal <antal@pelda.hu>"

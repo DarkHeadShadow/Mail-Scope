@@ -1,2 +1,3 @@
+# Project creator: Bálint Szabolcs
 # Optional PST/OST reader used by sources.pst_reader.
 libpff-python-windows==20231205
