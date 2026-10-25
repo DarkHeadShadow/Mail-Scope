@@ -1,6 +1,7 @@
 __author__ = "Bálint Szabolcs"
 
 import hashlib
+import json
 import sqlite3
 import tempfile
 import threading
@@ -541,6 +542,12 @@ class IndexerTests(unittest.TestCase):
             normalized_id = connection.execute(
                 "SELECT normalized_message_id FROM messages WHERE id = 1"
             ).fetchone()["normalized_message_id"]
+            has_saved_searches = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'saved_searches'
+                """
+            ).fetchone()
 
         self.assertIn("display_name", columns)
         self.assertEqual(participant["address"], "antal@pelda.hu")
@@ -551,7 +558,147 @@ class IndexerTests(unittest.TestCase):
                 "SELECT sent_timestamp FROM messages WHERE id = 1"
             ).fetchone()["sent_timestamp"]
         self.assertEqual(timestamp, 1640995200)
-        self.assertEqual(upgraded.metadata_value("schema_version"), "4")
+        self.assertEqual(upgraded.metadata_value("schema_version"), "5")
+        self.assertIsNotNone(has_saved_searches)
+
+    def test_detailed_search_labels_and_saved_searches(self) -> None:
+        """Search metadata, deduplicate hits, tag every copy, and persist queries."""
+        root_id = "<detailed-root@example.test>"
+        first = self.case_directory / "detailed-first.mbox"
+        first.write_bytes(
+            _mail(
+                message_id=root_id,
+                subject="Kitalált bizonyíték",
+                body="Kitalált részletes keresési kifejezés.",
+                attachment=True,
+            )
+            + _mail(
+                message_id="<detailed-next@example.test>",
+                subject="Másik üzenet",
+                body="Másik kitalált tartalom.",
+            )
+        )
+        duplicate = self.case_directory / "detailed-copy.mbox"
+        duplicate.write_bytes(
+            _mail(
+                message_id=root_id,
+                subject="Kitalált bizonyíték",
+                body="Kitalált részletes keresési kifejezés.",
+                attachment=True,
+            )
+        )
+        self.service.index_sources(discover_sources(self.case_directory))
+        root_message_id = next(
+            int(row["id"])
+            for row in self.database.search("bizonyíték")
+            if row["message_id"] == root_id
+        )
+
+        text_rows, text_total = self.database.detailed_search(
+            ({"field": "text", "value": "részletes keresési kifejezés"},),
+            operator="AND",
+        )
+        self.assertEqual(text_total, 1)
+        self.assertEqual(len(text_rows), 1)
+        self.assertEqual(text_rows[0]["message_id"], root_message_id)
+        unicode_case_rows, unicode_case_total = self.database.detailed_search(
+            ({"field": "subject", "value": "BIZONYÍTÉK"},),
+            operator="AND",
+        )
+        self.assertEqual(unicode_case_total, 1)
+        self.assertEqual(unicode_case_rows[0]["message_id"], root_message_id)
+
+        attachment_rows, attachment_total = self.database.detailed_search(
+            (
+                {"field": "has_attachment", "value": "yes"},
+                {"field": "sent_after", "value": "2022-01-01"},
+                {"field": "sent_before", "value": "2022-01-01"},
+            ),
+            operator="AND",
+        )
+        self.assertEqual(attachment_total, 1)
+        self.assertEqual(attachment_rows[0]["message_id"], root_message_id)
+        self.assertEqual(len(attachment_rows), 1)
+
+        grouped_rows, grouped_total = self.database.detailed_search(
+            (
+                {
+                    "operator": "OR",
+                    "conditions": [
+                        {"field": "subject", "value": "bizonyíték"},
+                        {"field": "from", "value": "ismeretlen@pelda.hu"},
+                    ],
+                },
+                {
+                    "operator": "AND",
+                    "conditions": [
+                        {"field": "has_attachment", "value": "yes"},
+                        {"field": "sent_after", "value": "2022-01-01"},
+                    ],
+                },
+            ),
+            operator="AND",
+        )
+        self.assertEqual(grouped_total, 1)
+        self.assertEqual(grouped_rows[0]["message_id"], root_message_id)
+
+        or_rows, or_total = self.database.detailed_search(
+            (
+                {"field": "subject", "value": "bizonyíték"},
+                {"field": "from", "value": "ismeretlen@pelda.hu"},
+            ),
+            operator="OR",
+        )
+        self.assertEqual(or_total, 1)
+        self.assertEqual(len(or_rows), 1)
+
+        self.assertEqual(
+            self.database.set_message_label((root_message_id,), "Ellenőrzendő", enabled=True),
+            2,
+        )
+        labeled_rows, labeled_total = self.database.detailed_search(
+            ({"field": "label", "value": "ellenőrzendő"},),
+            operator="AND",
+        )
+        self.assertEqual(labeled_total, 1)
+        self.assertEqual(labeled_rows[0]["message_id"], root_message_id)
+        self.assertEqual(
+            self.database.set_message_label((root_message_id,), "Ellenőrzendő", enabled=False),
+            2,
+        )
+        self.assertEqual(
+            self.database.detailed_search(
+                ({"field": "label", "value": "ellenőrzendő"},),
+                operator="AND",
+            )[1],
+            0,
+        )
+
+        saved_query = {
+            "conditions": [{"field": "subject", "value": "bizonyíték"}],
+            "operator": "AND",
+        }
+        self.database.save_search("Kitalált keresés", saved_query)
+        self.database.save_search("Kitalált keresés", {"conditions": [], "operator": "OR"})
+        saved_rows = self.database.saved_searches()
+        self.assertEqual(len(saved_rows), 1)
+        self.assertEqual(
+            json.loads(saved_rows[0]["query_json"]),
+            {"conditions": [], "operator": "OR"},
+        )
+        self.assertTrue(self.database.delete_saved_search("Kitalált keresés"))
+        self.assertFalse(self.database.delete_saved_search("Kitalált keresés"))
+
+        with self.assertRaises(ValueError):
+            self.database.detailed_search(
+                ({"field": "sent_after", "value": "2022-02-30"},),
+                operator="AND",
+            )
+        with self.assertRaises(ValueError):
+            self.database.detailed_search(
+                ({"field": "subject", "value": "x"},),
+                operator="XOR",
+            )
 
     def test_background_job_reports_progress_and_result(self) -> None:
         """Run indexing on a worker and expose its final progress and summary."""

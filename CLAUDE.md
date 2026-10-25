@@ -117,7 +117,13 @@ Forrás lehet:
    havi aktivitás és napokra bontott idővonal csendjelzéssel. A nyomtatási nézetből
    PDF menthető, az EML ZIP SHA-256 jegyzéket tartalmaz; export előtt az eredeti
    források hash-e ellenőrzött.
-6. Részletes keresés, címkék, mentett keresések.
+6. [x] Részletes keresés, címkék, mentett keresések: legfeljebb tíz, ÉS/VAGY
+   operátorral összekapcsolt feltételcsoport és összesen húsz mező; teljes szöveg,
+   tárgy, feladó, címzett, dátum, melléklet, forrás, mappa, melléklettípus és címke
+   szerinti szűrés; lapozható, duplikátum-összevont eredménylista; több forráspéldányra
+   érvényes címkézés; a találat résztvevőiből indítható beszélgetésnézet; ügyenkénti
+   mentés, betöltés és törlés. A címkék és keresések
+   kizárólag az ügy SQLite-adatbázisában tárolódnak.
 7. Exportok, PyInstaller build, README (magyar és angol).
 8. Felkészítés a GitHubra (lásd lent), első kiadás.
 

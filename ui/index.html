@@ -21,6 +21,7 @@
         <a class="side-link active" href="#case-panel"><span>01</span> Ügy és források</a>
         <a class="side-link" href="#archive-panel"><span>02</span> Archívum böngésző</a>
         <a class="side-link" href="#conversation-panel"><span>03</span> Beszélgetésnézet</a>
+        <a class="side-link" href="#detailed-search-panel"><span>04</span> Részletes keresés</a>
         <div class="sidebar-spacer"></div>
         <div class="privacy-card">
           <span class="privacy-dot"></span>
@@ -216,6 +217,61 @@
                 <p>A levél fejlécei és törzse közvetlenül az eredeti, változatlanságra ellenőrzött forrásból töltődik be.</p>
               </div>
             </article>
+          </div>
+        </section>
+
+        <section class="panel detailed-search-panel" id="detailed-search-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">04 / KERESÉS ÉS CÍMKÉZÉS</p>
+              <h2>Részletes keresés</h2>
+              <p class="muted">Állítson össze feltételeket az indexelt levelekhez. A címkék az ügy adatbázisába kerülnek, nem módosítják a forrásfájlokat.</p>
+            </div>
+          </div>
+          <div class="detailed-search-controls">
+            <div class="search-builder-heading">
+              <label class="field search-operator">
+                <span>Csoportok összekapcsolása</span>
+                <select id="detailed-search-operator">
+                  <option value="AND">ÉS (minden feltétel igaz)</option>
+                  <option value="OR">VAGY (bármelyik feltétel igaz)</option>
+                </select>
+              </label>
+              <button id="add-condition-button" class="button secondary" type="button">+ Feltételcsoport</button>
+            </div>
+            <div id="search-groups" class="search-groups"></div>
+            <div class="search-actions">
+              <button id="run-detailed-search-button" class="button primary" type="button">Keresés</button>
+              <label class="field saved-search-name">
+                <span>Mentett keresés neve</span>
+                <input id="saved-search-name" type="text" maxlength="100" placeholder="Például: 2024-es mellékletes levelek">
+              </label>
+              <button id="save-search-button" class="button secondary" type="button">Keresés mentése</button>
+              <label class="field saved-search-select">
+                <span>Mentett keresések</span>
+                <select id="saved-search-select">
+                  <option value="">Mentett keresés betöltése…</option>
+                </select>
+              </label>
+              <button id="delete-search-button" class="button quiet" type="button" disabled>Mentés törlése</button>
+            </div>
+          </div>
+          <p id="detailed-search-notice" class="notice" role="status" aria-live="polite"></p>
+          <div class="detailed-results-heading">
+            <h3>Találatok <span id="detailed-result-count" class="muted"></span></h3>
+            <div class="label-actions">
+              <label class="field">
+                <span>Kijelölt levelek címkéje</span>
+                <input id="result-label" type="text" maxlength="64" placeholder="Például: Fontos">
+              </label>
+              <button id="apply-label-button" class="button secondary" type="button">Címke hozzáadása</button>
+              <button id="remove-label-button" class="button quiet" type="button">Címke eltávolítása</button>
+            </div>
+          </div>
+          <div id="detailed-results" class="detailed-results empty-state">Adjon meg egy vagy több feltételt, majd indítsa el a keresést.</div>
+          <div class="detailed-pagination">
+            <button id="previous-search-page" class="button quiet" type="button" disabled>Előző oldal</button>
+            <button id="next-search-page" class="button quiet" type="button" disabled>Következő oldal</button>
           </div>
         </section>
         <footer class="page-footer">Mail-Scope · offline levélvizsgáló · Bálint Szabolcs</footer>

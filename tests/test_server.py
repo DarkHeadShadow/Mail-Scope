@@ -427,6 +427,110 @@ class ServerTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(export_response.read())) as export:
             self.assertEqual(export.namelist(), ["SHA256SUMS.txt"])
 
+    def test_detailed_search_label_and_saved_search_http_routes(self) -> None:
+        """Exercise detailed-search, label, and saved-search endpoints over loopback."""
+        source = self.root / "search-api.mbox"
+        source.write_bytes(_fixture_mail())
+        database = IndexDatabase.for_case(self.case_directory)
+        IndexingService(database).index_sources(discover_sources(source))
+        self.application.select_case(str(self.case_directory))
+        message_id = int(database.archive_messages()[0]["message_id"])
+
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+
+        def post(path: str, payload: dict[str, object]) -> tuple[int, object]:
+            """Send one local JSON request and decode the JSON response."""
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+
+        search_payload = {
+            "conditions": [{"field": "subject", "value": "helyi felület"}],
+            "operator": "AND",
+            "limit": 50,
+            "offset": 0,
+        }
+        status, search_result = post("/api/search", search_payload)
+        self.assertEqual(status, 200)
+        self.assertEqual(search_result["total"], 1)
+        self.assertEqual(search_result["results"][0]["message_id"], message_id)
+        self.assertEqual(
+            set(search_result["results"][0]["participant_addresses"].split(",")),
+            {"antal@pelda.hu", "anna@pelda.hu"},
+        )
+        grouped_status, grouped_result = post(
+            "/api/search",
+            {
+                "operator": "AND",
+                "groups": [
+                    {
+                        "operator": "OR",
+                        "conditions": [
+                            {"field": "subject", "value": "helyi felület"},
+                            {"field": "from", "value": "ismeretlen@pelda.hu"},
+                        ],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(grouped_status, 200)
+        self.assertEqual(grouped_result["total"], 1)
+
+        status, label_result = post(
+            "/api/labels",
+            {"message_ids": [message_id], "label": "API-címke", "enabled": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(label_result["occurrences_affected"], 1)
+        status, labeled_result = post(
+            "/api/search",
+            {
+                "conditions": [{"field": "label", "value": "API-címke"}],
+                "operator": "AND",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(labeled_result["total"], 1)
+
+        saved_payload = {
+            "name": "Kitalalt-API-kereses",
+            "groups": [
+                {
+                    "operator": "AND",
+                    "conditions": [{"field": "subject", "value": "helyi felület"}],
+                }
+            ],
+            "operator": "OR",
+        }
+        self.assertEqual(post("/api/searches", saved_payload)[0], 200)
+        connection.request("GET", "/api/searches")
+        saved_response = connection.getresponse()
+        saved_searches = json.loads(saved_response.read())
+        self.assertEqual(saved_searches[0]["name"], saved_payload["name"])
+        self.assertEqual(saved_searches[0]["query"]["groups"], saved_payload["groups"])
+        self.assertEqual(saved_searches[0]["query"]["operator"], saved_payload["operator"])
+        self.assertEqual(
+            post(
+                f"/api/searches/{saved_payload['name']}",
+                {},
+            )[0],
+            200,
+        )
+        self.assertEqual(post("/api/search", {"conditions": [], "operator": "AND"})[0], 400)
+
 
 if __name__ == "__main__":
     unittest.main()

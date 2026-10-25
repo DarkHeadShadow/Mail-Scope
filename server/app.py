@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from indexer import IndexDatabase, IndexingJob, IndexingService, PersonDirectory
 from sources.models import MessageLocator
@@ -190,6 +190,93 @@ class MailScopeApplication:
                     _row_json(row) for row in database.observed_addresses()
                 ],
             }
+
+    def detailed_search(
+        self,
+        conditions: tuple[dict[str, Any], ...],
+        *,
+        operator: str,
+        limit: int,
+        offset: int,
+    ) -> dict[str, Any]:
+        """Run a validated detailed search with pagination and result count."""
+        with self._lock:
+            database = self._require_case()
+            rows, total = database.detailed_search(
+                conditions,
+                operator=operator,
+                limit=limit,
+                offset=offset,
+            )
+            return {
+                "results": [_row_json(row) for row in rows],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    def saved_searches(self) -> list[dict[str, Any]]:
+        """Return named searches with their validated, decoded condition groups."""
+        with self._lock:
+            database = self._require_case()
+            result: list[dict[str, Any]] = []
+            for row in database.saved_searches():
+                try:
+                    query = json.loads(str(row["query_json"]))
+                except json.JSONDecodeError as error:
+                    logger.exception("Saved search could not be decoded: %s", row["name"])
+                    raise ApiError(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        f"A mentett keresés hibás JSON: {row['name']}",
+                    ) from error
+                result.append(
+                    {
+                        "name": str(row["name"]),
+                        "query": query,
+                        "created_at": str(row["created_at"]),
+                        "updated_at": str(row["updated_at"]),
+                    }
+                )
+            return result
+
+    def save_search(
+        self,
+        name: str,
+        conditions: tuple[dict[str, Any], ...],
+        operator: str,
+    ) -> dict[str, Any]:
+        """Validate and store one named flat or grouped detailed-search query."""
+        with self._lock:
+            database = self._require_case()
+            database.detailed_search(conditions, operator=operator, limit=1)
+            is_grouped = bool(conditions) and all(
+                "conditions" in condition for condition in conditions
+            )
+            database.save_search(
+                name,
+                {
+                    "groups" if is_grouped else "conditions": list(conditions),
+                    "operator": operator,
+                },
+            )
+            return {"name": name.strip()}
+
+    def delete_saved_search(self, name: str) -> dict[str, Any]:
+        """Delete a saved-search definition from the active case."""
+        with self._lock:
+            database = self._require_case()
+            if not database.delete_saved_search(name):
+                raise ApiError(HTTPStatus.NOT_FOUND, "A mentett keresés nem található.")
+            return {"deleted": name}
+
+    def set_labels(
+        self, message_ids: tuple[int, ...], label: str, *, enabled: bool
+    ) -> dict[str, Any]:
+        """Assign or remove one case-local label across all message copies."""
+        with self._lock:
+            database = self._require_case()
+            affected = database.set_message_label(message_ids, label, enabled=enabled)
+            return {"label": label.strip(), "occurrences_affected": affected}
 
     def create_person(
         self, display_name: str, addresses: tuple[str, ...]
@@ -498,6 +585,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 )
             elif request.path == "/api/people":
                 self._send_json(HTTPStatus.OK, self.server.application.people())
+            elif request.path == "/api/searches":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.application.saved_searches(),
+                )
             elif request.path == "/api/archive":
                 self._send_archive(parse_qs(request.query))
             elif request.path == "/api/conversation":
@@ -560,6 +652,43 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("Az addresses mező e-mail-címek listája legyen.")
                 response = self.server.application.create_person(
                     display_name, tuple(addresses)
+                )
+            elif path == "/api/search":
+                conditions, operator = self._search_conditions(payload)
+                limit = _payload_integer(payload, "limit", 100, maximum=200)
+                offset = _payload_integer(payload, "offset", 0, maximum=1_000_000)
+                response = self.server.application.detailed_search(
+                    conditions,
+                    operator=operator,
+                    limit=limit,
+                    offset=offset,
+                )
+            elif path == "/api/searches":
+                conditions, operator = self._search_conditions(payload)
+                response = self.server.application.save_search(
+                    _required_string(payload, "name"),
+                    conditions,
+                    operator,
+                )
+            elif path.startswith("/api/searches/"):
+                name = unquote(path.removeprefix("/api/searches/"))
+                response = self.server.application.delete_saved_search(name)
+            elif path == "/api/labels":
+                message_ids = payload.get("message_ids")
+                if not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 200 or not all(
+                    isinstance(message_id, int)
+                    and not isinstance(message_id, bool)
+                    and message_id > 0
+                    for message_id in message_ids
+                ):
+                    raise ValueError("A message_ids pozitív egész azonosítók listája legyen.")
+                enabled = payload.get("enabled", True)
+                if not isinstance(enabled, bool):
+                    raise ValueError("Az enabled mező logikai érték legyen.")
+                response = self.server.application.set_labels(
+                    tuple(message_ids),
+                    _required_string(payload, "label"),
+                    enabled=enabled,
                 )
             elif path == "/api/discover":
                 response = {
@@ -638,6 +767,71 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "query": _single_value(query, "q"),
             "thread_key": _single_value(query, "thread_key") or None,
         }
+
+    @staticmethod
+    def _search_conditions(
+        payload: Any,
+    ) -> tuple[tuple[dict[str, Any], ...], str]:
+        """Validate flat conditions or nested, bounded AND/OR condition groups."""
+        if not isinstance(payload, dict):
+            raise ValueError("A keresési feltételek JSON-objektum legyenek.")
+        allowed_fields = {
+            "text",
+            "subject",
+            "from",
+            "to",
+            "sent_after",
+            "sent_before",
+            "has_attachment",
+            "source",
+            "folder",
+            "attachment_type",
+            "label",
+        }
+
+        def validate_conditions(raw_conditions: Any) -> list[dict[str, str]]:
+            """Validate one non-empty bounded list of condition objects."""
+            if (
+                not isinstance(raw_conditions, list)
+                or not 1 <= len(raw_conditions) <= 20
+            ):
+                raise ValueError("Adjon meg 1 és 20 közötti keresési feltételt.")
+            normalized_conditions: list[dict[str, str]] = []
+            for raw_condition in raw_conditions:
+                if not isinstance(raw_condition, dict):
+                    raise ValueError("Minden keresési feltétel objektum legyen.")
+                field = raw_condition.get("field")
+                value = raw_condition.get("value")
+                if not isinstance(field, str) or field not in allowed_fields:
+                    raise ValueError(f"Ismeretlen keresési mező: {field}")
+                if not isinstance(value, str):
+                    raise ValueError("Minden keresési érték szöveg legyen.")
+                normalized_conditions.append({"field": field, "value": value})
+            return normalized_conditions
+
+        operator = payload.get("operator", "AND")
+        if not isinstance(operator, str) or operator not in {"AND", "OR"}:
+            raise ValueError("A feltétel-összekötő AND vagy OR legyen.")
+        raw_groups = payload.get("groups")
+        if raw_groups is None:
+            conditions = validate_conditions(payload.get("conditions"))
+            return tuple(conditions), operator
+        if not isinstance(raw_groups, list) or not 1 <= len(raw_groups) <= 10:
+            raise ValueError("Adjon meg 1 és 10 közötti feltételcsoportot.")
+        groups: list[dict[str, Any]] = []
+        total_conditions = 0
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, dict):
+                raise ValueError("Minden keresési csoport objektum legyen.")
+            group_operator = raw_group.get("operator", "AND")
+            if not isinstance(group_operator, str) or group_operator not in {"AND", "OR"}:
+                raise ValueError("A csoporton belüli összekötő AND vagy OR legyen.")
+            conditions = validate_conditions(raw_group.get("conditions"))
+            total_conditions += len(conditions)
+            if total_conditions > 20:
+                raise ValueError("Összesen legfeljebb 20 feltétel adható meg.")
+            groups.append({"operator": group_operator, "conditions": conditions})
+        return tuple(groups), operator
 
     def _read_json(self) -> dict[str, Any]:
         """Read a bounded JSON object and reject other request content types."""
@@ -762,6 +956,24 @@ def _required_string(payload: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"A(z) {key} mező nem lehet üres.")
     return value.strip()
+
+
+def _payload_integer(
+    payload: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    maximum: int | None = None,
+) -> int:
+    """Read an integer from a JSON request and enforce safe pagination bounds."""
+    value = payload.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"A {key} mező egész szám legyen.")
+    if value < 0 or (maximum is not None and value > maximum):
+        raise ValueError(f"A {key} mező értéke kívül esik az engedélyezett tartományon.")
+    if key == "limit" and value == 0:
+        raise ValueError("A limit legalább 1 legyen.")
+    return value
 
 
 def _single_value(query: dict[str, list[str]], key: str) -> str:

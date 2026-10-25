@@ -3,9 +3,10 @@
 __author__ = "Bálint Szabolcs"
 
 import calendar
+import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Generator
@@ -115,6 +116,13 @@ CREATE TABLE IF NOT EXISTS occurrence_labels (
     PRIMARY KEY(occurrence_id, label)
 );
 
+CREATE TABLE IF NOT EXISTS saved_searches (
+    name TEXT PRIMARY KEY,
+    query_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_occurrences_message ON occurrences(message_id);
 CREATE INDEX IF NOT EXISTS idx_participants_address ON participants(address);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_key);
@@ -163,6 +171,9 @@ class IndexDatabase:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.create_function(
+            "casefold", 1, _sqlite_casefold, deterministic=True
+        )
         try:
             yield connection
             connection.commit()
@@ -238,7 +249,7 @@ class IndexDatabase:
                     INSERT INTO app_metadata(key, value) VALUES (?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
-                    ("schema_version", "4"),
+                    ("schema_version", "5"),
                 )
                 connection.execute(
                     """
@@ -788,7 +799,8 @@ class IndexDatabase:
                     """
                     WITH matched AS (
                         SELECT messages.id AS message_id, messages.subject,
-                               messages.sent_date, messages.message_id AS internet_message_id,
+                               messages.sent_date, messages.sent_timestamp,
+                               messages.message_id AS internet_message_id,
                                messages.thread_key, messages.content_hash,
                                occurrences.id AS occurrence_id, occurrences.source_id,
                                occurrences.folder_id, occurrences.locator_offset,
@@ -830,6 +842,338 @@ class IndexDatabase:
                     parameters,
                 )
             )
+
+    def detailed_search(
+        self,
+        conditions: tuple[dict[str, Any], ...],
+        *,
+        operator: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Search indexed mail with flat conditions or nested AND/OR groups."""
+        if operator not in {"AND", "OR"}:
+            raise ValueError("Search operator must be AND or OR")
+        if limit <= 0 or offset < 0:
+            raise ValueError("Search pagination values are invalid")
+        if any(not isinstance(item, dict) for item in conditions):
+            raise ValueError("Search conditions must be objects")
+        grouped = bool(conditions) and all("conditions" in item for item in conditions)
+        group_sizes: list[tuple[int, str]] = []
+        if grouped:
+            if len(conditions) > 10:
+                raise ValueError("At most 10 search groups are allowed")
+            flattened_conditions: list[dict[str, Any]] = []
+            for group in conditions:
+                group_operator = group.get("operator")
+                group_conditions = group.get("conditions")
+                if group_operator not in {"AND", "OR"}:
+                    raise ValueError("Each search group must use AND or OR")
+                if (
+                    not isinstance(group_conditions, list)
+                    or not 1 <= len(group_conditions) <= 20
+                ):
+                    raise ValueError("Each search group needs between 1 and 20 conditions")
+                group_sizes.append((len(group_conditions), group_operator))
+                flattened_conditions.extend(group_conditions)
+            if len(flattened_conditions) > 20:
+                raise ValueError("At most 20 search conditions are allowed")
+        else:
+            if not conditions:
+                raise ValueError("At least one search condition is required")
+            if len(conditions) > 20:
+                raise ValueError("At most 20 search conditions are allowed")
+            flattened_conditions = list(conditions)
+        expression_parts: list[str] = []
+        parameters: list[object] = []
+        for condition in flattened_conditions:
+            if not isinstance(condition, dict):
+                raise ValueError("Each search condition must be an object")
+            field = condition.get("field", "")
+            raw_value = condition.get("value", "")
+            if not isinstance(field, str) or not isinstance(raw_value, str):
+                raise ValueError("Search fields and values must be strings")
+            value = raw_value.strip()
+            if len(value) > 512:
+                raise ValueError("Search condition values must be 512 characters or fewer")
+            if field in {"text", "subject"}:
+                if not value:
+                    raise ValueError("Text search conditions must not be empty")
+                if field == "text":
+                    expression_parts.append(
+                        """
+                        EXISTS (
+                            SELECT 1 FROM messages_fts
+                            WHERE messages_fts.rowid = messages.id
+                              AND messages_fts MATCH ?
+                        )
+                        """
+                    )
+                    parameters.append(f'"{value.replace(chr(34), chr(34) * 2)}"')
+                else:
+                    expression_parts.append(
+                        "casefold(messages.subject) LIKE ? ESCAPE '\\'"
+                    )
+                    parameters.append(f"%{_escape_like(value.casefold())}%")
+            elif field in {"from", "to"}:
+                if not value:
+                    raise ValueError("Participant search conditions must not be empty")
+                expression_parts.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM participants
+                        WHERE participants.message_id = messages.id
+                          AND participants.role = ?
+                          AND (
+                              casefold(participants.address) LIKE ? ESCAPE '\\'
+                              OR casefold(participants.display_name) LIKE ? ESCAPE '\\'
+                          )
+                    )
+                    """
+                )
+                pattern = f"%{_escape_like(value.casefold())}%"
+                parameters.extend((field, pattern, pattern))
+            elif field in {"sent_after", "sent_before"}:
+                bound = _search_date_timestamp(value, next_day=field == "sent_before")
+                expression_parts.append(
+                    "messages.sent_timestamp >= ?"
+                    if field == "sent_after"
+                    else "messages.sent_timestamp < ?"
+                )
+                parameters.append(bound)
+            elif field == "has_attachment":
+                if value not in {"yes", "no"}:
+                    raise ValueError("Attachment condition must be yes or no")
+                expression_parts.append(
+                    (
+                        "EXISTS"
+                        if value == "yes"
+                        else "NOT EXISTS"
+                    )
+                    + " (SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
+                )
+            elif field in {"source", "folder"}:
+                if not value:
+                    raise ValueError("Source and folder search conditions must not be empty")
+                column = (
+                    "sources.path"
+                    if field == "source"
+                    else "folders.path || '/' || folders.name"
+                )
+                relation = "occurrences JOIN sources ON sources.id = occurrences.source_id"
+                if field == "folder":
+                    relation += " LEFT JOIN folders ON folders.id = occurrences.folder_id"
+                expression_parts.append(
+                    f"""
+                    EXISTS (
+                        SELECT 1 FROM {relation}
+                        WHERE occurrences.message_id = messages.id
+                          AND casefold({column}) LIKE ? ESCAPE '\\'
+                    )
+                    """
+                )
+                parameters.append(f"%{_escape_like(value.casefold())}%")
+            elif field == "attachment_type":
+                if not value:
+                    raise ValueError("Attachment type search conditions must not be empty")
+                expression_parts.append(
+                    """
+                    EXISTS (
+                        SELECT 1 FROM attachments
+                        WHERE attachments.message_id = messages.id
+                          AND casefold(attachments.content_type) LIKE ? ESCAPE '\\'
+                    )
+                    """
+                )
+                parameters.append(f"%{_escape_like(value.casefold())}%")
+            elif field == "label":
+                if not value:
+                    raise ValueError("Label search conditions must not be empty")
+                expression_parts.append(
+                    """
+                    EXISTS (
+                        SELECT 1
+                        FROM occurrences
+                        JOIN occurrence_labels
+                          ON occurrence_labels.occurrence_id = occurrences.id
+                        WHERE occurrences.message_id = messages.id
+                          AND casefold(occurrence_labels.label) LIKE ? ESCAPE '\\'
+                    )
+                    """
+                )
+                parameters.append(f"%{_escape_like(value.casefold())}%")
+            else:
+                raise ValueError(f"Unsupported search condition: {field}")
+
+        if grouped:
+            grouped_expressions: list[str] = []
+            expression_index = 0
+            for group_size, group_operator in group_sizes:
+                group_parts = expression_parts[
+                    expression_index : expression_index + group_size
+                ]
+                group_expression = f" {group_operator} ".join(group_parts)
+                grouped_expressions.append(f"({group_expression})")
+                expression_index += group_size
+            where_clause = f" {operator} ".join(grouped_expressions)
+        else:
+            where_clause = f" {operator} ".join(expression_parts)
+        with self.connection() as connection:
+            total_row = connection.execute(
+                f"SELECT count(*) AS count FROM messages WHERE {where_clause}",
+                parameters,
+            ).fetchone()
+            rows = list(
+                connection.execute(
+                    f"""
+                    WITH matched AS (
+                        SELECT messages.id AS message_id, messages.subject,
+                               messages.sent_date, messages.sent_timestamp,
+                               messages.message_id AS internet_message_id,
+                               messages.thread_key, messages.content_hash,
+                               occurrences.id AS occurrence_id, occurrences.source_id,
+                               occurrences.folder_id, occurrences.locator_offset,
+                               occurrences.locator_length, occurrences.locator_folder_path,
+                               occurrences.locator_item_index, occurrences.locator_item_id,
+                               occurrences.message_hash, occurrences.deleted,
+                               occurrences.item_type, occurrences.error,
+                               sources.path AS source_path, sources.kind AS source_kind,
+                               folders.path AS folder_path, folders.name AS folder_name,
+                               (
+                                   SELECT group_concat(address, ', ')
+                                   FROM participants
+                                   WHERE participants.message_id = messages.id
+                                     AND participants.role = 'from'
+                               ) AS sender,
+                               (
+                                   SELECT group_concat(DISTINCT address)
+                                   FROM participants
+                                   WHERE participants.message_id = messages.id
+                                     AND participants.role IN ('from', 'to')
+                               ) AS participant_addresses,
+                               (
+                                   SELECT group_concat(DISTINCT occurrence_labels.label)
+                                   FROM occurrences AS labeled_occurrence
+                                   JOIN occurrence_labels
+                                     ON occurrence_labels.occurrence_id = labeled_occurrence.id
+                                   WHERE labeled_occurrence.message_id = messages.id
+                               ) AS labels,
+                               count(*) OVER (PARTITION BY messages.id) AS copy_count,
+                               row_number() OVER (
+                                   PARTITION BY messages.id ORDER BY occurrences.id
+                               ) AS copy_number
+                        FROM messages
+                        JOIN occurrences ON occurrences.message_id = messages.id
+                        JOIN sources ON sources.id = occurrences.source_id
+                        LEFT JOIN folders ON folders.id = occurrences.folder_id
+                        WHERE messages.id IN (
+                            SELECT id FROM messages WHERE {where_clause}
+                        )
+                    )
+                    SELECT * FROM matched
+                    WHERE copy_number = 1
+                    ORDER BY sent_timestamp IS NULL, sent_timestamp DESC, message_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    [*parameters, limit, offset],
+                )
+            )
+        return rows, int(total_row["count"])
+
+    def set_message_label(
+        self, message_ids: tuple[int, ...], label: str, *, enabled: bool
+    ) -> int:
+        """Apply or remove a user label on every indexed copy of selected messages."""
+        normalized_label = label.strip()
+        if not normalized_label or len(normalized_label) > 64:
+            raise ValueError("A label must contain between 1 and 64 characters")
+        if any(ord(character) < 32 for character in normalized_label):
+            raise ValueError("Labels must not contain control characters")
+        if (
+            not message_ids
+            or len(message_ids) > 200
+            or any(
+                not isinstance(message_id, int)
+                or isinstance(message_id, bool)
+                or message_id <= 0
+                for message_id in message_ids
+            )
+        ):
+            raise ValueError("At least one valid message ID must be selected")
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self.connection() as connection:
+            if enabled:
+                connection.execute(
+                    f"""
+                    INSERT OR IGNORE INTO occurrence_labels(occurrence_id, label)
+                    SELECT id, ? FROM occurrences
+                    WHERE message_id IN ({placeholders})
+                    """,
+                    (normalized_label, *message_ids),
+                )
+            else:
+                connection.execute(
+                    f"""
+                    DELETE FROM occurrence_labels
+                    WHERE label = ?
+                      AND occurrence_id IN (
+                          SELECT id FROM occurrences
+                          WHERE message_id IN ({placeholders})
+                      )
+                    """,
+                    (normalized_label, *message_ids),
+                )
+            affected = connection.execute(
+                f"""
+                SELECT count(DISTINCT id) AS count FROM occurrences
+                WHERE message_id IN ({placeholders})
+                """,
+                message_ids,
+            ).fetchone()
+        return int(affected["count"])
+
+    def saved_searches(self) -> list[sqlite3.Row]:
+        """Return saved detailed searches in stable display order."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT name, query_json, created_at, updated_at
+                    FROM saved_searches
+                    ORDER BY name COLLATE NOCASE
+                    """
+                )
+            )
+
+    def save_search(self, name: str, query: dict[str, Any]) -> None:
+        """Create or replace a named search without storing executable SQL."""
+        normalized_name = name.strip()
+        if not normalized_name or len(normalized_name) > 100:
+            raise ValueError("A saved search name must contain 1 to 100 characters")
+        if any(ord(character) < 32 for character in normalized_name):
+            raise ValueError("Saved search names must not contain control characters")
+        query_json = json.dumps(query, ensure_ascii=False, sort_keys=True)
+        if len(query_json) > 16384:
+            raise ValueError("A saved search must be 16 KB or smaller")
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO saved_searches(name, query_json)
+                VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    query_json = excluded.query_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_name, query_json),
+            )
+
+    def delete_saved_search(self, name: str) -> bool:
+        """Delete a named search and report whether it existed."""
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM saved_searches WHERE name = ?", (name,)
+            )
+        return cursor.rowcount > 0
 
     def message_details(self, message_id: int) -> sqlite3.Row | None:
         """Return indexed message headers and body for an archive selection."""
@@ -1338,6 +1682,32 @@ def _parse_message_timestamp(sent_date: str | None) -> int | None:
         return calendar.timegm(parsed.astimezone(timezone.utc).utctimetuple())
     except (OverflowError, ValueError):
         return None
+
+
+def _search_date_timestamp(value: str, *, next_day: bool) -> int:
+    """Convert one strict calendar date into an inclusive/exclusive UTC boundary."""
+    if len(value) != 10:
+        raise ValueError("Date search conditions must use YYYY-MM-DD")
+    try:
+        selected_date = date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("Date search conditions must use a valid YYYY-MM-DD date") from error
+    timestamp = calendar.timegm(
+        datetime.combine(
+            selected_date, datetime.min.time(), tzinfo=timezone.utc
+        ).utctimetuple()
+    )
+    return timestamp + 86400 if next_day else timestamp
+
+
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE metacharacters so user values stay literal substrings."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sqlite_casefold(value: str | None) -> str:
+    """Expose Unicode-aware casefolding to SQLite's detailed-search predicates."""
+    return "" if value is None else value.casefold()
 
 
 def _normalize_addresses(addresses: tuple[str, ...]) -> tuple[str, ...]:

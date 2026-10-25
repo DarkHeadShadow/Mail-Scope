@@ -12,6 +12,10 @@ const state = {
   selectedMessageId: null,
   pollTimer: null,
   lastPeopleRefresh: "",
+  detailedSearch: { conditions: [], operator: "AND" },
+  detailedResults: [],
+  detailedTotal: 0,
+  detailedOffset: 0,
 };
 
 const element = (id) => document.getElementById(id);
@@ -89,6 +93,271 @@ function formatBytes(value) {
     unit = units[index];
   }
   return `${size.toFixed(1)} ${unit}`;
+}
+
+/**
+ * Render one safe, editable condition row for the detailed-search builder.
+ */
+function createSearchCondition(condition = { field: "text", value: "" }) {
+  const row = document.createElement("div");
+  row.className = "search-condition";
+
+  const field = document.createElement("select");
+  field.setAttribute("aria-label", "Keresési mező");
+  [
+    ["text", "Teljes szöveg"],
+    ["subject", "Tárgy"],
+    ["from", "Feladó"],
+    ["to", "Címzett"],
+    ["sent_after", "Kezdő dátum"],
+    ["sent_before", "Záró dátum"],
+    ["has_attachment", "Melléklet"],
+    ["source", "Forrás útvonala"],
+    ["folder", "Mappa"],
+    ["attachment_type", "Melléklet típusa"],
+    ["label", "Címke"],
+  ].forEach(([value, label]) => field.add(new Option(label, value)));
+  field.value = condition.field || "text";
+
+  const value = document.createElement("input");
+  value.setAttribute("aria-label", "Keresési érték");
+  value.maxLength = 512;
+  value.value = typeof condition.value === "string" ? condition.value : "";
+  const updateValueControl = () => {
+    value.type = ["sent_after", "sent_before"].includes(field.value) ? "date" : "search";
+    value.placeholder = field.value === "has_attachment"
+      ? "yes vagy no"
+      : ["sent_after", "sent_before"].includes(field.value)
+        ? ""
+        : "Keresési érték";
+    if (field.value === "has_attachment" && !["yes", "no"].includes(value.value)) {
+      value.value = "yes";
+    }
+  };
+  field.addEventListener("change", updateValueControl);
+  updateValueControl();
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button quiet remove-condition";
+  remove.textContent = "Eltávolítás";
+  remove.setAttribute("aria-label", "Keresési feltétel eltávolítása");
+  remove.addEventListener("click", () => {
+    if (row.parentElement.children.length > 1) row.remove();
+  });
+  row.append(field, value, remove);
+  return row;
+}
+
+/**
+ * Create a condition group with its own AND/OR operator and removable rows.
+ */
+function createSearchGroup(group = { operator: "AND", conditions: [{ field: "text", value: "" }] }) {
+  const container = document.createElement("section");
+  container.className = "search-group";
+  const heading = document.createElement("div");
+  heading.className = "search-group-heading";
+  const title = document.createElement("strong");
+  title.textContent = "Feltételcsoport";
+
+  const operator = document.createElement("select");
+  operator.setAttribute("aria-label", "Csoporton belüli feltételek összekapcsolása");
+  operator.add(new Option("ÉS", "AND"));
+  operator.add(new Option("VAGY", "OR"));
+  operator.value = group.operator === "OR" ? "OR" : "AND";
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "button quiet";
+  add.textContent = "+ Feltétel";
+  add.addEventListener("click", () => {
+    if (
+      conditions.children.length < 20
+      && element("search-groups").querySelectorAll(".search-condition").length < 20
+    ) {
+      conditions.append(createSearchCondition());
+    }
+  });
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "button quiet";
+  remove.textContent = "Csoport eltávolítása";
+  remove.addEventListener("click", () => {
+    if (element("search-groups").children.length > 1) container.remove();
+  });
+
+  const conditions = document.createElement("div");
+  conditions.className = "group-conditions";
+  const rows = Array.isArray(group.conditions) && group.conditions.length
+    ? group.conditions
+    : [{ field: "text", value: "" }];
+  rows.forEach((condition) => conditions.append(createSearchCondition(condition)));
+  heading.append(title, operator, add, remove);
+  container.append(heading, conditions);
+  return container;
+}
+
+/**
+ * Read the current condition builder into nested AND/OR search groups.
+ */
+function collectDetailedSearch() {
+  return {
+    operator: element("detailed-search-operator").value,
+    groups: [...element("search-groups").querySelectorAll(":scope > .search-group")].map((group) => ({
+      operator: group.querySelector(".search-group-heading select").value,
+      conditions: [...group.querySelectorAll(".search-condition")].map((row) => ({
+        field: row.querySelector("select").value,
+        value: row.querySelector("input").value.trim(),
+      })),
+    })),
+  };
+}
+
+/**
+ * Select known sender/recipient people and open the conversation workspace.
+ */
+function openConversationForMessage(message) {
+  const addresses = new Set(
+    String(message.participant_addresses || "")
+      .split(",")
+      .map((address) => address.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const matchedPeople = state.people.filter((person) =>
+    person.addresses.some((address) => addresses.has(address.toLowerCase())),
+  );
+  const selectedIds = new Set(matchedPeople.map((person) => String(person.id)));
+  element("conversation-people").querySelectorAll("input[type=\"checkbox\"]").forEach((checkbox) => {
+    checkbox.checked = selectedIds.has(checkbox.value);
+  });
+  element("conversation-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (matchedPeople.length < 2) {
+    element("conversation-notice").textContent =
+      "A beszélgetés megnyitásához rendelje a feladót és legalább egy címzettet két külön személyhez.";
+    element("conversation-notice").classList.add("error");
+    return;
+  }
+  loadConversation();
+}
+
+/**
+ * Render detailed-search hits with checkboxes and safe text nodes.
+ */
+function renderDetailedResults() {
+  const results = element("detailed-results");
+  results.replaceChildren();
+  if (state.detailedResults.length === 0) {
+    results.className = "detailed-results empty-state";
+    results.textContent = "Nincs a feltételeknek megfelelő indexelt levél.";
+  } else {
+    results.className = "detailed-results";
+    state.detailedResults.forEach((message) => {
+      const row = document.createElement("div");
+      row.className = "detailed-result-row";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = String(message.message_id);
+      checkbox.setAttribute("aria-label", `${message.subject || "Levél"} kijelölése`);
+
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "detailed-result-open";
+      const subject = document.createElement("strong");
+      subject.textContent = message.subject || "(nincs tárgy)";
+      const meta = document.createElement("span");
+      meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${message.sent_date || "Dátum nélkül"} · ${message.source_path}`;
+      open.append(subject, meta);
+      open.addEventListener("click", () => openMessage(Number(message.message_id)));
+
+      const labels = document.createElement("span");
+      labels.className = "detailed-result-labels";
+      labels.textContent = message.labels || "";
+      const conversation = document.createElement("button");
+      conversation.type = "button";
+      conversation.className = "button quiet conversation-from-result";
+      conversation.textContent = "Beszélgetés";
+      conversation.title = "A feladó és a címzett személyeinek megnyitása a beszélgetésnézetben";
+      conversation.addEventListener("click", () => openConversationForMessage(message));
+      row.append(checkbox, open, labels, conversation);
+      results.append(row);
+    });
+  }
+  const end = Math.min(state.detailedOffset + state.detailedResults.length, state.detailedTotal);
+  const start = state.detailedTotal === 0 ? 0 : state.detailedOffset + 1;
+  element("detailed-result-count").textContent =
+    `· ${start.toLocaleString("hu-HU")}–${end.toLocaleString("hu-HU")} / ${state.detailedTotal.toLocaleString("hu-HU")}`;
+  element("previous-search-page").disabled = state.detailedOffset === 0;
+  element("next-search-page").disabled = end >= state.detailedTotal;
+}
+
+/**
+ * Execute the current detailed search and update its result page.
+ */
+async function runDetailedSearch(offset = 0) {
+  const query = collectDetailedSearch();
+  try {
+    const result = await requestJson("/api/search", {
+      method: "POST",
+      body: JSON.stringify({ ...query, limit: 50, offset }),
+    });
+    state.detailedSearch = query;
+    state.detailedResults = result.results;
+    state.detailedTotal = result.total;
+    state.detailedOffset = result.offset;
+    renderDetailedResults();
+    element("detailed-search-notice").textContent = "A keresés befejeződött.";
+    element("detailed-search-notice").classList.remove("error");
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+}
+
+/**
+ * Load saved searches and preserve each query as structured JSON data.
+ */
+async function refreshSavedSearches() {
+  try {
+    const saved = await requestJson("/api/searches");
+    const select = element("saved-search-select");
+    select.replaceChildren(new Option("Mentett keresés betöltése…", ""));
+    saved.forEach((search) => select.add(new Option(search.name, search.name)));
+    element("delete-search-button").disabled = true;
+  } catch (error) {
+    if (!error.message.includes("Előbb nyisson meg")) {
+      element("detailed-search-notice").textContent = error.message;
+      element("detailed-search-notice").classList.add("error");
+    }
+  }
+}
+
+/**
+ * Apply or remove one label for all selected detailed-search results.
+ */
+async function updateSelectedLabels(enabled) {
+  const messageIds = [...element("detailed-results").querySelectorAll("input:checked")]
+    .map((checkbox) => Number(checkbox.value));
+  const label = element("result-label").value.trim();
+  if (!messageIds.length || !label) {
+    element("detailed-search-notice").textContent = "Jelöljön ki leveleket és adjon meg egy címkét.";
+    element("detailed-search-notice").classList.add("error");
+    return;
+  }
+  try {
+    const result = await requestJson("/api/labels", {
+      method: "POST",
+      body: JSON.stringify({ message_ids: messageIds, label, enabled }),
+    });
+    element("detailed-search-notice").textContent =
+      `${result.label} címke frissítve (${result.occurrences_affected} forráspéldány).`;
+    element("detailed-search-notice").classList.remove("error");
+    await runDetailedSearch(state.detailedOffset);
+    if (state.selectedMessageId) await openMessage(state.selectedMessageId);
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
 }
 
 /**
@@ -747,9 +1016,14 @@ element("case-form").addEventListener("submit", async (event) => {
     state.lastPeopleRefresh = "";
     state.people = [];
     state.folders = [];
+    state.detailedResults = [];
+    state.detailedTotal = 0;
+    state.detailedOffset = 0;
     renderStatus(status);
+    renderDetailedResults();
     await refreshFolders();
     await refreshPeople();
+    await refreshSavedSearches();
     await refreshArchive();
     showNotice("Az ügy megnyitva. A források most már felismerhetők és indexelhetők.");
   } catch (error) {
@@ -845,13 +1119,93 @@ element("conversation-pdf-button").addEventListener("click", () => {
 });
 
 /**
+ * Add, run, save, load, and paginate detailed-search condition groups.
+ */
+element("add-condition-button").addEventListener("click", () => {
+  if (
+    element("search-groups").children.length < 10
+    && element("search-groups").querySelectorAll(".search-condition").length < 20
+  ) {
+    element("search-groups").append(createSearchGroup());
+  }
+});
+element("run-detailed-search-button").addEventListener("click", () => runDetailedSearch());
+element("save-search-button").addEventListener("click", async () => {
+  const query = collectDetailedSearch();
+  try {
+    const saved = await requestJson("/api/searches", {
+      method: "POST",
+      body: JSON.stringify({ ...query, name: element("saved-search-name").value.trim() }),
+    });
+    await refreshSavedSearches();
+    element("saved-search-select").value = saved.name;
+    element("delete-search-button").disabled = false;
+    element("detailed-search-notice").textContent = `A(z) „${saved.name}” keresés mentve.`;
+    element("detailed-search-notice").classList.remove("error");
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+});
+element("saved-search-select").addEventListener("change", async () => {
+  const name = element("saved-search-select").value;
+  element("delete-search-button").disabled = !name;
+  if (!name) return;
+  try {
+    const saved = await requestJson("/api/searches");
+    const selected = saved.find((item) => item.name === name);
+    if (!selected) throw new Error("A mentett keresés nem található.");
+    element("detailed-search-operator").value = selected.query.operator;
+    const groups = selected.query.groups || [{
+      operator: selected.query.operator || "AND",
+      conditions: selected.query.conditions || [{ field: "text", value: "" }],
+    }];
+    element("search-groups").replaceChildren(
+      ...groups.map((group) => createSearchGroup(group)),
+    );
+    element("saved-search-name").value = selected.name;
+    await runDetailedSearch();
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+});
+element("delete-search-button").addEventListener("click", async () => {
+  const name = element("saved-search-select").value;
+  if (!name) return;
+  try {
+    await requestJson(`/api/searches/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    element("saved-search-name").value = "";
+    await refreshSavedSearches();
+    element("detailed-search-notice").textContent = `A(z) „${name}” mentett keresés törölve.`;
+    element("detailed-search-notice").classList.remove("error");
+  } catch (error) {
+    element("detailed-search-notice").textContent = error.message;
+    element("detailed-search-notice").classList.add("error");
+  }
+});
+element("apply-label-button").addEventListener("click", () => updateSelectedLabels(true));
+element("remove-label-button").addEventListener("click", () => updateSelectedLabels(false));
+element("previous-search-page").addEventListener("click", () => {
+  runDetailedSearch(Math.max(0, state.detailedOffset - 50));
+});
+element("next-search-page").addEventListener("click", () => {
+  runDetailedSearch(state.detailedOffset + 50);
+});
+
+/**
  * Load the case currently selected when the local page opens.
  */
 async function initialize() {
+  element("search-groups").append(createSearchGroup());
   const status = await refreshStatus();
   if (!status || !status.case) return;
   await refreshFolders();
   await refreshPeople();
+  await refreshSavedSearches();
   await refreshArchive();
 }
 
