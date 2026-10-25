@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+.pytest_cache/
+.mailscope/
+*.log
+*.pst
+*.ost
+*.mbox
+*.mbx
+*.mbs
+*.eml
+
+# Synthetic mailbox fixtures are allowed in the test suite.
+!tests/fixtures/
+!tests/fixtures/**

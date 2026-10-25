@@ -1,0 +1,7 @@
+PST/OST support uses the unmodified pypff Python bindings for libpff,
+provided by the libpff-python-windows package and loaded as a separate
+dynamic module.
+
+libpff and pypff are licensed under the GNU Lesser General Public License
+version 3 or later (LGPL-3.0-or-later). The upstream project and license
+text are available at https://github.com/libyal/libpff.
