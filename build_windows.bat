@@ -25,6 +25,7 @@ call ".venv\Scripts\python.exe" -m PyInstaller ^
     --icon "assets\logo\mail-scope.ico" ^
     --add-data "ui;ui" ^
     --add-data "assets\logo;assets\logo" ^
+    --add-data "LICENSE;." ^
     --add-data "LICENSES\NOTICE_libpff.txt;LICENSES" ^
     --add-data "THIRD_PARTY_NOTICES.md;." ^
     --collect-all pypff ^

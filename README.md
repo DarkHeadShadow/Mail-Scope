@@ -4,7 +4,7 @@
 
 Mail-Scope is an offline, local-first mail archive browser and analysis tool. It reads mail archives directly, indexes message metadata and searchable text in a case-local SQLite database, and opens the original message from its source when requested.
 
-> **Development status:** version `0.1.0`. This project is under active development and is not yet a signed or released Windows application. The project license has not been selected.
+> **Development status:** version `0.1.0`. This project is under active development and is not yet a signed or released Windows application. Mail-Scope is licensed under the MIT License; third-party components retain their own licenses.
 
 ## Features
 
@@ -80,11 +80,11 @@ Detailed search supports subject, full-text, sender, recipient, inclusive date b
 - Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source.
 - A PDF is produced through the browser's print dialog, not by a bundled PDF library.
 - Search and export limits are enforced to keep local responses bounded.
-- Project-level license selection and public-release preparation remain pending.
+- Public-release preparation remains pending.
 
 ## Third-party notices
 
-PST/OST support uses LGPL-3.0-or-later `libpff`/`pypff`. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) and [LICENSES/NOTICE_libpff.txt](./LICENSES/NOTICE_libpff.txt). Mail-Scope itself does not yet declare a project license.
+Mail-Scope is licensed under the [MIT License](./LICENSE). PST/OST support uses LGPL-3.0-or-later `libpff`/`pypff`; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) and [LICENSES/NOTICE_libpff.txt](./LICENSES/NOTICE_libpff.txt).
 
 ## Screenshots
 

@@ -2,6 +2,9 @@
 
 Project creator: Bálint Szabolcs
 
+Mail-Scope itself is licensed under the MIT License; see [LICENSE](./LICENSE).
+Third-party components remain under their respective licenses.
+
 ## libpff / pypff
 
 PST/OST support uses the unmodified `pypff` bindings from

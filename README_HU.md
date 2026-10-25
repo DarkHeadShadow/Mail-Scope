@@ -4,7 +4,7 @@
 
 A Mail-Scope offline, helyben futó levélnéző és -elemző program. Közvetlenül olvassa a postafiókforrásokat, a levél-metaadatokat és kereshető tartalmat az ügy SQLite-adatbázisába indexeli, a teljes eredeti levelet pedig kérésre az eredeti forrásból nyitja meg.
 
-> **Fejlesztési állapot:** `0.1.0` verzió. A projekt aktív fejlesztés alatt áll; még nincs aláírt vagy kiadott Windows-alkalmazás. A projekt licencét még nem választottuk ki.
+> **Fejlesztési állapot:** `0.1.0` verzió. A projekt aktív fejlesztés alatt áll; még nincs aláírt vagy kiadott Windows-alkalmazás. A Mail-Scope MIT-licencű; a külső összetevők a saját licencük alatt maradnak.
 
 ## Funkciók
 
@@ -80,11 +80,11 @@ A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró d
 - A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.
-- A projektlicenc kiválasztása és a nyilvános közzététel előkészítése még hátravan.
+- A nyilvános közzététel előkészítése még hátravan.
 
 ## Harmadik féltől származó összetevők
 
-A PST/OST-támogatás LGPL-3.0-or-later licencű `libpff`/`pypff` könyvtárat használ. Részletek: [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) és [LICENSES/NOTICE_libpff.txt](./LICENSES/NOTICE_libpff.txt). A Mail-Scope saját projektlicence még nincs megadva.
+A Mail-Scope licencét a [LICENSE](./LICENSE) fájl tartalmazza (MIT). A PST/OST-támogatás ettől elkülönülő, LGPL-3.0-or-later licencű `libpff`/`pypff` könyvtárat használ. Részletek: [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) és [LICENSES/NOTICE_libpff.txt](./LICENSES/NOTICE_libpff.txt).
 
 ## Képernyőképek
 

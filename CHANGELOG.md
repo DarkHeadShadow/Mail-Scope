@@ -14,5 +14,8 @@ Project changes are recorded here. This project has not made a public release ye
 - Added conversation EML ZIP export with SHA-256 manifest and browser-print PDF workflows.
 - Added detailed-search CSV and EML ZIP exports.
 - Added Windows PyInstaller build and English/Hungarian usage documentation.
+- Added Windows/Python 3.13 GitHub Actions CI and tagged release packaging.
+- Added browser auto-start, hidden-console Windows packaging, and graceful indexed-state shutdown.
+- Selected the MIT License for Mail-Scope; third-party components retain their own licenses.
 
-This is a development snapshot, not a public release. The project license has not been selected.
+This is a development snapshot, not a public release.

@@ -8,6 +8,8 @@ dist/
 .pytest_cache/
 .mailscope/
 *.log
+# Keep machine-local VS Code settings, including command approvals, out of Git.
+/.vscode/settings.json
 *.pst
 *.ost
 *.mbox
