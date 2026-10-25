@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     dedup_key TEXT NOT NULL UNIQUE,
     message_id TEXT,
+    normalized_message_id TEXT NOT NULL DEFAULT '',
     thread_key TEXT NOT NULL,
     subject TEXT NOT NULL,
     normalized_subject TEXT NOT NULL,
@@ -58,6 +59,19 @@ CREATE TABLE IF NOT EXISTS participants (
     role TEXT NOT NULL CHECK(role IN ('from', 'to', 'cc', 'bcc')),
     address TEXT NOT NULL,
     UNIQUE(message_id, role, address)
+);
+
+CREATE TABLE IF NOT EXISTS people (
+    id INTEGER PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS person_addresses (
+    address TEXT PRIMARY KEY,
+    person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL DEFAULT '',
+    assigned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -162,6 +176,51 @@ class IndexDatabase:
                 connection.execute(
                     "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?, ?)",
                     ("creator", "Bálint Szabolcs"),
+                )
+                participant_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(participants)")
+                }
+                if "display_name" not in participant_columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE participants
+                        ADD COLUMN display_name TEXT NOT NULL DEFAULT ''
+                        """
+                    )
+                message_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(messages)")
+                }
+                if "normalized_message_id" not in message_columns:
+                    connection.execute(
+                        """
+                        ALTER TABLE messages
+                        ADD COLUMN normalized_message_id TEXT NOT NULL DEFAULT ''
+                        """
+                    )
+                    for row in connection.execute(
+                        "SELECT id, message_id FROM messages WHERE message_id IS NOT NULL"
+                    ).fetchall():
+                        connection.execute(
+                            """
+                            UPDATE messages SET normalized_message_id = ?
+                            WHERE id = ?
+                            """,
+                            (_normalize_message_id(row["message_id"]), row["id"]),
+                        )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_messages_normalized_message_id
+                    ON messages(normalized_message_id)
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO app_metadata(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    ("schema_version", "3"),
                 )
         except sqlite3.OperationalError as error:
             if "fts5" in str(error).casefold():
@@ -320,6 +379,50 @@ class IndexDatabase:
             ).fetchone()
         return row is not None
 
+    def resolve_thread_key(
+        self,
+        proposed_key: str,
+        normalized_subject: str,
+        parent_ids: tuple[str, ...],
+    ) -> str:
+        """Resolve known parent IDs and subject fallbacks to an existing thread."""
+        with self.connection() as connection:
+            if parent_ids:
+                existing_messages = connection.execute(
+                    """
+                    SELECT normalized_message_id, thread_key FROM messages
+                    WHERE normalized_message_id IN (
+                    """
+                    + ", ".join("?" for _ in parent_ids)
+                    + """
+                    )
+                    ORDER BY id
+                    """,
+                    tuple(parent_ids),
+                ).fetchall()
+                threads_by_parent: dict[str, str] = {}
+                for row in existing_messages:
+                    threads_by_parent.setdefault(
+                        str(row["normalized_message_id"]), str(row["thread_key"])
+                    )
+                for parent_id in parent_ids:
+                    if parent_id.casefold() in threads_by_parent:
+                        return threads_by_parent[parent_id.casefold()]
+                return proposed_key
+
+            if normalized_subject:
+                row = connection.execute(
+                    """
+                    SELECT thread_key FROM messages
+                    WHERE normalized_subject = ?
+                    ORDER BY id LIMIT 1
+                    """,
+                    (normalized_subject,),
+                ).fetchone()
+                if row is not None:
+                    return str(row["thread_key"])
+        return proposed_key
+
     def store_message(
         self,
         *,
@@ -342,14 +445,15 @@ class IndexDatabase:
                 cursor = connection.execute(
                     """
                     INSERT INTO messages (
-                        dedup_key, message_id, thread_key, subject,
+                        dedup_key, message_id, normalized_message_id, thread_key, subject,
                         normalized_subject, sent_date, in_reply_to,
                         references_header, body, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         dedup_key,
                         metadata.message_id,
+                        _normalize_message_id(metadata.message_id or ""),
                         thread_key,
                         metadata.subject,
                         normalized_subject,
@@ -368,6 +472,10 @@ class IndexDatabase:
                     UPDATE messages
                     SET body = CASE WHEN body = '' THEN ? ELSE body END,
                         subject = CASE WHEN subject = '' THEN ? ELSE subject END,
+                        normalized_message_id = CASE
+                            WHEN normalized_message_id = '' THEN ?
+                            ELSE normalized_message_id
+                        END,
                         normalized_subject = CASE
                             WHEN normalized_subject = '' THEN ? ELSE normalized_subject
                         END,
@@ -379,6 +487,7 @@ class IndexDatabase:
                     (
                         metadata.text_body,
                         metadata.subject,
+                        _normalize_message_id(metadata.message_id or ""),
                         normalized_subject,
                         metadata.date,
                         metadata.in_reply_to,
@@ -393,17 +502,27 @@ class IndexDatabase:
                 ("cc", metadata.cc_addresses),
                 ("bcc", metadata.bcc_addresses),
             ):
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO participants(message_id, role, address)
-                    VALUES (?, ?, ?)
-                    """,
-                    [
-                        (message_id, role, address.strip().casefold())
-                        for address in addresses
-                        if address.strip()
-                    ],
-                )
+                for address in addresses:
+                    normalized_address = address.strip().casefold()
+                    if not normalized_address:
+                        continue
+                    display_name = _participant_display_name(
+                        metadata, role, normalized_address
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO participants(
+                            message_id, role, address, display_name
+                        ) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(message_id, role, address)
+                        DO UPDATE SET display_name = CASE
+                            WHEN participants.display_name = ''
+                            THEN excluded.display_name
+                            ELSE participants.display_name
+                        END
+                        """,
+                        (message_id, role, normalized_address, display_name),
+                    )
             connection.executemany(
                 """
                 INSERT OR IGNORE INTO attachments(
@@ -500,10 +619,37 @@ class IndexDatabase:
                 )
             return occurrence_inserted
 
-    def search(self, query: str, limit: int = 100) -> list[sqlite3.Row]:
-        """Search subject, body, and attachment names using the FTS5 index."""
+    def search(
+        self,
+        query: str,
+        limit: int = 100,
+        *,
+        person_ids: tuple[int, ...] | None = None,
+        include_cc_bcc: bool = True,
+    ) -> list[sqlite3.Row]:
+        """Search FTS content, optionally restricted to selected people."""
         if limit <= 0:
             raise ValueError("Search result limit must be positive")
+        if person_ids is not None and not person_ids:
+            return []
+        person_filter = ""
+        parameters: list[object] = [query]
+        if person_ids is not None:
+            role_filter = "" if include_cc_bcc else "AND participant.role IN ('from', 'to')"
+            placeholders = ", ".join("?" for _ in person_ids)
+            person_filter = f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM participants AS participant
+                    JOIN person_addresses AS assigned_address
+                      ON assigned_address.address = participant.address
+                    WHERE participant.message_id = messages.id
+                      {role_filter}
+                      AND assigned_address.person_id IN ({placeholders})
+                )
+            """
+            parameters.extend(person_ids)
+        parameters.append(limit)
         with self.connection() as connection:
             return list(
                 connection.execute(
@@ -514,10 +660,13 @@ class IndexDatabase:
                     FROM messages_fts
                     JOIN messages ON messages.id = messages_fts.rowid
                     WHERE messages_fts MATCH ?
+                    """
+                    + person_filter
+                    + """
                     ORDER BY rank, messages.id
                     LIMIT ?
                     """,
-                    (query, limit),
+                    parameters,
                 )
             )
 
@@ -606,3 +755,210 @@ class IndexDatabase:
                 "SELECT value FROM app_metadata WHERE key = ?", (key,)
             ).fetchone()
         return None if row is None else str(row["value"])
+
+    def create_person(
+        self, display_name: str, addresses: tuple[str, ...] = ()
+    ) -> int:
+        """Create a named person and optionally assign email aliases."""
+        normalized_name = display_name.strip()
+        if not normalized_name:
+            raise ValueError("Person display name must not be empty")
+        normalized_addresses = _normalize_addresses(addresses)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO people(display_name) VALUES (?)",
+                (normalized_name,),
+            )
+            person_id = int(cursor.lastrowid)
+            for address in normalized_addresses:
+                self._assign_address(
+                    connection, person_id, address, normalized_name
+                )
+            return person_id
+
+    def assign_address(
+        self, person_id: int, address: str, display_name: str = ""
+    ) -> None:
+        """Assign one address to a person, refusing cross-person alias collisions."""
+        normalized_address = _normalize_address(address)
+        if not normalized_address:
+            raise ValueError("Email address must not be empty")
+        with self.connection() as connection:
+            self._assign_address(
+                connection,
+                person_id,
+                normalized_address,
+                display_name.strip(),
+            )
+
+    @staticmethod
+    def _assign_address(
+        connection: sqlite3.Connection,
+        person_id: int,
+        address: str,
+        display_name: str,
+    ) -> None:
+        """Insert or update an address after validating its person."""
+        person = connection.execute(
+            "SELECT display_name FROM people WHERE id = ?", (person_id,)
+        ).fetchone()
+        if person is None:
+            raise ValueError(f"Person does not exist: {person_id}")
+        current = connection.execute(
+            "SELECT person_id FROM person_addresses WHERE address = ?", (address,)
+        ).fetchone()
+        if current is not None and current["person_id"] != person_id:
+            raise ValueError(
+                f"Email address is already assigned to person "
+                f"{current['person_id']}: {address}"
+            )
+        connection.execute(
+            """
+            INSERT INTO person_addresses(address, person_id, display_name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(address) DO UPDATE SET display_name = CASE
+                WHEN excluded.display_name != '' THEN excluded.display_name
+                ELSE person_addresses.display_name
+            END
+            """,
+            (address, person_id, display_name or person["display_name"]),
+        )
+
+    def remove_address(self, person_id: int, address: str) -> bool:
+        """Unassign an address from a person and report whether it existed."""
+        normalized_address = _normalize_address(address)
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM person_addresses WHERE person_id = ? AND address = ?",
+                (person_id, normalized_address),
+            )
+        return cursor.rowcount > 0
+
+    def rename_person(self, person_id: int, display_name: str) -> None:
+        """Change a person's canonical display name."""
+        normalized_name = display_name.strip()
+        if not normalized_name:
+            raise ValueError("Person display name must not be empty")
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE people SET display_name = ? WHERE id = ?",
+                (normalized_name, person_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"Person does not exist: {person_id}")
+
+    def merge_people(self, target_id: int, source_id: int) -> None:
+        """Move source aliases into a target person and remove the source record."""
+        if target_id == source_id:
+            raise ValueError("A person cannot be merged into itself")
+        with self.connection() as connection:
+            people = connection.execute(
+                "SELECT id FROM people WHERE id IN (?, ?)",
+                (target_id, source_id),
+            ).fetchall()
+            if len(people) != 2:
+                raise ValueError("Both people must exist before merging")
+            connection.execute(
+                "UPDATE person_addresses SET person_id = ? WHERE person_id = ?",
+                (target_id, source_id),
+            )
+            connection.execute("DELETE FROM people WHERE id = ?", (source_id,))
+
+    def people(self) -> list[sqlite3.Row]:
+        """Return people with their assigned addresses and observed names."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT people.id, people.display_name,
+                           person_addresses.address,
+                           person_addresses.display_name AS address_display_name
+                    FROM people
+                    LEFT JOIN person_addresses ON person_addresses.person_id = people.id
+                    ORDER BY people.display_name COLLATE NOCASE,
+                             person_addresses.address
+                    """
+                )
+            )
+
+    def person_suggestion_rows(self) -> list[sqlite3.Row]:
+        """Return observed names and addresses suitable for merge suggestions."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT participants.address, participants.display_name,
+                           person_addresses.person_id
+                    FROM participants
+                    LEFT JOIN person_addresses
+                      ON person_addresses.address = participants.address
+                    WHERE trim(participants.display_name) != ''
+                    ORDER BY lower(participants.display_name), participants.address
+                    """
+                )
+            )
+
+    def message_ids_for_person(self, person_id: int) -> list[int]:
+        """Find messages involving a person through any assigned address."""
+        with self.connection() as connection:
+            return [
+                int(row["message_id"])
+                for row in connection.execute(
+                    """
+                    SELECT DISTINCT participants.message_id
+                    FROM participants
+                    JOIN person_addresses
+                      ON person_addresses.address = participants.address
+                    WHERE person_addresses.person_id = ?
+                    ORDER BY participants.message_id
+                    """,
+                    (person_id,),
+                )
+            ]
+
+    def thread_messages(self, thread_key: str) -> list[sqlite3.Row]:
+        """Return messages in a thread ordered by date, then stable message ID."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT id, message_id, thread_key, subject, sent_date,
+                           in_reply_to, references_header
+                    FROM messages
+                    WHERE thread_key = ?
+                    ORDER BY sent_date IS NULL, sent_date, id
+                    """,
+                    (thread_key,),
+                )
+            )
+
+
+def _normalize_address(address: str) -> str:
+    """Normalize an email address for identity matching."""
+    return address.strip().casefold()
+
+
+def _normalize_message_id(message_id: str) -> str:
+    """Normalize case and optional angle brackets for indexed thread lookups."""
+    normalized = message_id.strip().casefold()
+    if normalized.startswith("<") and normalized.endswith(">"):
+        return normalized[1:-1]
+    return normalized
+
+
+def _normalize_addresses(addresses: tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize and deduplicate a set of email addresses."""
+    return tuple(sorted({_normalize_address(address) for address in addresses if address.strip()}))
+
+
+def _participant_display_name(
+    metadata: MessageMetadata, role: str, normalized_address: str
+) -> str:
+    """Find the first observed display name for a role/address pair."""
+    for participant_role, address, display_name in metadata.participant_names:
+        if (
+            participant_role == role
+            and _normalize_address(address) == normalized_address
+        ):
+            return display_name.strip()
+    return ""

@@ -101,3 +101,23 @@ def message_addresses(message: EmailMessage, header: str) -> tuple[str, ...]:
         for _, address in getaddresses(message.get_all(header, []))
         if address
     )
+
+
+def message_participant_names(
+    message: EmailMessage,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return role/address/display-name tuples from standard message headers."""
+    role_headers = (
+        ("from", "From"),
+        ("to", "To"),
+        ("cc", "Cc"),
+        ("bcc", "Bcc"),
+    )
+    participants: list[tuple[str, str, str]] = []
+    for role, header in role_headers:
+        participants.extend(
+            (role, address, display_name)
+            for display_name, address in getaddresses(message.get_all(header, []))
+            if address
+        )
+    return tuple(participants)

@@ -1,6 +1,7 @@
 __author__ = "Bálint Szabolcs"
 
 import hashlib
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -8,7 +9,7 @@ from email import policy
 from email.message import EmailMessage
 from pathlib import Path
 
-from indexer import IndexDatabase, IndexingService
+from indexer import IndexDatabase, IndexingService, PersonDirectory
 from sources.discover import discover_sources
 
 
@@ -18,6 +19,7 @@ def _mail(
     subject: str,
     body: str,
     from_address: str = "antal@pelda.hu",
+    from_display_name: str = "Teszt Antal",
     to_address: str = "anna@pelda.hu",
     cc_address: str | None = None,
     bcc_address: str | None = None,
@@ -28,7 +30,7 @@ def _mail(
 ) -> bytes:
     """Build a fictional RFC 5322 message for indexer tests."""
     message = EmailMessage()
-    message["From"] = f"Teszt Antal <{from_address}>"
+    message["From"] = f"{from_display_name} <{from_address}>"
     message["To"] = f"Teszt Anna <{to_address}>"
     if cc_address is not None:
         message["Cc"] = cc_address
@@ -334,6 +336,204 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(self.database.occurrence_count(), 1)
         self.assertEqual(self.database.search("Régi"), [])
         self.assertEqual(len(self.database.search("tartalom")), 1)
+
+    def test_person_aliases_suggestions_and_person_filtered_search(self) -> None:
+        """Suggest shared display names and filter messages through aliases."""
+        mailbox = self.case_directory / "people.mbox"
+        mailbox.write_bytes(
+            _mail(
+                message_id="<person-one@example.test>",
+                subject="Első személy",
+                body="Kereshető levél.",
+                from_address="antal@pelda.hu",
+            )
+            + _mail(
+                message_id="<person-two@example.test>",
+                subject="Második személy",
+                body="Kereshető levél.",
+                from_address="antal.masik@pelda.hu",
+            )
+            + _mail(
+                message_id="<other@example.test>",
+                subject="Másik résztvevő",
+                body="Kereshető levél.",
+                from_address="bela@pelda.hu",
+                from_display_name="Teszt Béla",
+                cc_address="antal@pelda.hu",
+            )
+        )
+        self.service.index_sources(discover_sources(mailbox))
+        directory = PersonDirectory(self.database)
+
+        suggestions = directory.suggestions()
+
+        self.assertTrue(
+            any(
+                suggestion.display_name == "Teszt Antal"
+                and suggestion.addresses
+                == ("antal.masik@pelda.hu", "antal@pelda.hu")
+                for suggestion in suggestions
+            )
+        )
+        person = directory.create_person(
+            "Bálint Antal", ("ANTAL@PELDA.HU", "antal.masik@pelda.hu")
+        )
+        self.assertFalse(
+            any(
+                suggestion.addresses
+                == ("antal.masik@pelda.hu", "antal@pelda.hu")
+                for suggestion in directory.suggestions()
+            )
+        )
+        person = directory.assign_address(
+            person.id, "antal.third@pelda.hu", "Teszt Antal"
+        )
+        self.assertIn("antal.third@pelda.hu", person.addresses)
+        self.assertTrue(directory.remove_address(person.id, "ANTAL.THIRD@PELDA.HU"))
+        person = directory.rename(person.id, "Antal Teszt")
+        self.assertEqual(person.display_name, "Antal Teszt")
+        self.assertEqual(
+            len(directory.search("Kereshető", (person.id,), include_cc_bcc=False)),
+            2,
+        )
+        self.assertEqual(
+            len(directory.search("Kereshető", (person.id,), include_cc_bcc=True)),
+            3,
+        )
+        with self.assertRaises(ValueError):
+            directory.create_person("Másik Antal", ("antal@pelda.hu",))
+
+        other_person = directory.create_person("Teszt Béla", ("bela@pelda.hu",))
+        merged = directory.merge(person.id, other_person.id)
+        self.assertEqual(
+            merged.addresses,
+            ("antal.masik@pelda.hu", "antal@pelda.hu", "bela@pelda.hu"),
+        )
+        self.assertEqual(
+            len(directory.search("Kereshető", (person.id,), include_cc_bcc=True)),
+            3,
+        )
+        self.assertEqual(len(directory.people()), 1)
+
+    def test_groups_reply_chains_by_reference_and_normalized_subject(self) -> None:
+        """Use message references first and normalized subjects as fallback."""
+        mailbox = self.case_directory / "threads.mbox"
+        mailbox.write_bytes(
+            _mail(
+                message_id="<root@example.test>",
+                subject="Kitalált szál",
+                body="Szülő.",
+            )
+            + _mail(
+                message_id="<reply-one@example.test>",
+                subject="Re: Kitalált szál",
+                body="Első válasz.",
+                in_reply_to="<root@example.test>",
+            )
+            + _mail(
+                message_id="<reply-two@example.test>",
+                subject="Fwd: Re: Kitalált szál",
+                body="Második válasz.",
+                references="<root@example.test> <reply-one@example.test>",
+            )
+            + _mail(
+                message_id="<reply-three@example.test>",
+                subject="VS: Kitalált szál",
+                body="Tárgy alapján kapcsolt válasz.",
+            )
+        )
+        self.service.index_sources(discover_sources(mailbox))
+
+        with self.database.connection() as connection:
+            keys = [
+                row["thread_key"]
+                for row in connection.execute(
+                    "SELECT thread_key FROM messages ORDER BY id"
+                )
+            ]
+
+        self.assertEqual(
+            keys,
+            ["mid:root@example.test"] * 4,
+        )
+        self.assertEqual(
+            len(self.database.thread_messages("mid:root@example.test")),
+            4,
+        )
+
+    def test_migrates_existing_participant_table(self) -> None:
+        """Upgrade a prior schema by adding display-name storage safely."""
+        legacy_path = self.case_directory / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE participants (
+                    id INTEGER PRIMARY KEY,
+                    message_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    UNIQUE(message_id, role, address)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    dedup_key TEXT NOT NULL UNIQUE,
+                    message_id TEXT,
+                    thread_key TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    normalized_subject TEXT NOT NULL,
+                    sent_date TEXT,
+                    in_reply_to TEXT,
+                    references_header TEXT,
+                    body TEXT NOT NULL,
+                    content_hash TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO messages(
+                    dedup_key, message_id, thread_key, subject,
+                    normalized_subject, sent_date, in_reply_to,
+                    references_header, body, content_hash
+                ) VALUES (
+                    'legacy', '<Legacy@Example.Test>', 'mid:legacy@example.test',
+                    'Régi', 'régi', NULL, NULL, NULL, 'Tartalom', 'hash'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO participants(message_id, role, address)
+                VALUES (1, 'from', 'antal@pelda.hu')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        upgraded = IndexDatabase(legacy_path)
+        with upgraded.connection() as connection:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(participants)")
+            }
+            participant = connection.execute(
+                "SELECT address, display_name FROM participants"
+            ).fetchone()
+            normalized_id = connection.execute(
+                "SELECT normalized_message_id FROM messages WHERE id = 1"
+            ).fetchone()["normalized_message_id"]
+
+        self.assertIn("display_name", columns)
+        self.assertEqual(participant["address"], "antal@pelda.hu")
+        self.assertEqual(participant["display_name"], "")
+        self.assertEqual(normalized_id, "legacy@example.test")
+        self.assertEqual(upgraded.metadata_value("schema_version"), "3")
 
     def test_background_job_reports_progress_and_result(self) -> None:
         """Run indexing on a worker and expose its final progress and summary."""

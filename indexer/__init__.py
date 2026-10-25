@@ -3,6 +3,14 @@
 __author__ = "Bálint Szabolcs"
 
 from .database import IndexDatabase
+from .people import Person, PersonDirectory, PersonSuggestion
 from .service import IndexingJob, IndexingService
 
-__all__ = ["IndexDatabase", "IndexingJob", "IndexingService"]
+__all__ = [
+    "IndexDatabase",
+    "IndexingJob",
+    "IndexingService",
+    "Person",
+    "PersonDirectory",
+    "PersonSuggestion",
+]

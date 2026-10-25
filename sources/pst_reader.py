@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Iterator, Any
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
-from .content import message_addresses, message_body_text
+from .content import (
+    message_addresses,
+    message_body_text,
+    message_participant_names,
+)
 
 
 ITEM_TYPE_TAG = 0x001A
@@ -278,6 +282,7 @@ class PstReader:
             item_type=item_type,
             text_body=message_body_text(message),
             attachment_content_types=_attachment_types(item),
+            participant_names=message_participant_names(message),
         )
 
     @staticmethod

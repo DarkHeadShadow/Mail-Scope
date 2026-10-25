@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Iterator
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
-from .content import message_addresses, message_body_text
+from .content import (
+    message_addresses,
+    message_body_text,
+    message_participant_names,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -177,6 +181,7 @@ class MboxReader:
             labels=MboxReader._gmail_labels(message),
             deleted=deleted,
             text_body=message_body_text(message),
+            participant_names=message_participant_names(message),
         )
 
     @staticmethod

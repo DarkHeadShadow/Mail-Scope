@@ -65,6 +65,8 @@ Forrás lehet:
 - **Személyek:** több e-mail-cím egy személyhez rendelhető (kézzel összevonható, javaslattal
   a megjelenő név alapján). Minden szűrés személyre megy, nem címre. PST/OST-ben az Exchange
   (`/O=…/CN=…`) címeket SMTP-címre kell feloldani, ahol lehetséges.
+- A személyhez rendelés nem módosítja a forrásleveleket; a felismert megjelenőnevek csak
+  jóváhagyható javaslatokat adnak, az e-mail-címekhez pedig pontosan egy személy rendelhető.
 - **Szálak:** In-Reply-To / References alapján, tartalékként normalizált tárgy (Re:/Fw:/VS: le);
   PST/OST-ben a ConversationIndex is felhasználható.
 - `server/` – helyi webszerver (pl. FastAPI vagy a standard library), csak 127.0.0.1-en.
@@ -104,7 +106,7 @@ Forrás lehet:
 1. [x] Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),
    forrásfelismerés, tesztek kis mintafájlokkal a `tests/` alatt.
 2. [x] Indexelő + SQLite séma + FTS5, háttérindexelés, folytatás, forrás-hash ellenőrzés.
-3. Személyek és címek összevonása, duplikátumok, szálak.
+3. [x] Személyek és címek összevonása, duplikátumok, szálak.
 4. Helyi szerver + Ügy és források képernyő + Archívum böngésző.
 5. Beszélgetés-nézet.
 6. Részletes keresés, címkék, mentett keresések.

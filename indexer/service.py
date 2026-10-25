@@ -186,6 +186,17 @@ class IndexingService:
                         dedup_key, thread_key, normalized_subject, content_hash = (
                             _message_keys(source_id, metadata)
                         )
+                        thread_key = self.database.resolve_thread_key(
+                            thread_key,
+                            normalized_subject,
+                            tuple(
+                                _parent_ids(
+                                    metadata.references,
+                                    metadata.in_reply_to,
+                                    metadata.message_id,
+                                )
+                            ),
+                        )
                         inserted = self.database.store_message(
                             source_id=source_id,
                             folder_id=folder_id,
@@ -400,9 +411,11 @@ def _message_keys(
     else:
         dedup_key = f"content:{content_hash}"
 
-    parent_ids = _reference_ids(metadata.references)
-    if not parent_ids and metadata.in_reply_to:
-        parent_ids = [_normalize_message_id(metadata.in_reply_to)]
+    parent_ids = _parent_ids(
+        metadata.references,
+        metadata.in_reply_to,
+        metadata.message_id,
+    )
     if parent_ids and parent_ids[0]:
         thread_key = f"mid:{parent_ids[0]}"
     elif message_id:
@@ -412,6 +425,26 @@ def _message_keys(
     else:
         thread_key = f"message:{dedup_key}"
     return dedup_key, thread_key, normalized_subject, content_hash
+
+
+def _parent_ids(
+    references: str | None,
+    in_reply_to: str | None,
+    message_id: str | None,
+) -> list[str]:
+    """Prefer root IDs from References, then use the direct reply parent."""
+    current_id = _normalize_message_id(message_id)
+    referenced_ids = [
+        identifier
+        for identifier in _reference_ids(references)
+        if identifier and identifier != current_id
+    ]
+    if referenced_ids:
+        return referenced_ids
+    direct_parent = _normalize_message_id(in_reply_to)
+    if direct_parent and direct_parent != current_id:
+        return [direct_parent]
+    return []
 
 
 def _normalize_subject(subject: str) -> str:

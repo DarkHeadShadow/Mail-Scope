@@ -54,6 +54,7 @@ class MessageMetadata:
     attachment_names: tuple[str, ...]
     text_body: str = ""
     attachment_content_types: tuple[str, ...] = ()
+    participant_names: tuple[tuple[str, str, str], ...] = ()
     labels: tuple[str, ...] = ()
     deleted: bool = False
     item_type: str = "mail"
