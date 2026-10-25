@@ -158,6 +158,18 @@ class IndexerTests(unittest.TestCase):
             self.database.labels_for_message(root_message_id),
             ["Első", "Kiemelt", "Második"],
         )
+        self.assertEqual(len(self.database.archive_messages()), 2)
+        self.assertEqual(len(self.database.archive_messages(include_duplicates=True)), 3)
+        self.assertEqual(len(self.database.archive_messages("szuperkereshető")), 1)
+        self.assertEqual(len(self.database.archive_messages(has_attachments=True)), 1)
+        self.assertEqual(
+            sum(folder["message_count"] for folder in self.database.folders()),
+            3,
+        )
+        self.assertEqual(
+            len(self.database.occurrences_for_message(root_message_id)),
+            2,
+        )
         self.assertEqual(
             self.database.attachment_names_for_message(root_message_id),
             ["bizonyitek.txt"],

@@ -107,7 +107,10 @@ Forrás lehet:
    forrásfelismerés, tesztek kis mintafájlokkal a `tests/` alatt.
 2. [x] Indexelő + SQLite séma + FTS5, háttérindexelés, folytatás, forrás-hash ellenőrzés.
 3. [x] Személyek és címek összevonása, duplikátumok, szálak.
-4. Helyi szerver + Ügy és források képernyő + Archívum böngésző.
+4. [x] Helyi, `127.0.0.1` címre kötött szerver + Ügy és források képernyő +
+   Archívum böngésző. A case- és forrásfelismerés, háttérindexelés, mappa-/levéllista,
+   szűrők és forenzikus megnyitás működik; a kiválasztott levél az eredeti forrásból
+   töltődik be, SHA-256 ellenőrzés után. Indítás: `py -3.13 -m server`.
 5. Beszélgetés-nézet.
 6. Részletes keresés, címkék, mentett keresések.
 7. Exportok, PyInstaller build, README (magyar és angol).

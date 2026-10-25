@@ -684,6 +684,164 @@ class IndexDatabase:
                 )
             )
 
+    def folders(self, source_id: int | None = None) -> list[sqlite3.Row]:
+        """List indexed folders with their source and occurrence counts."""
+        conditions = ""
+        parameters: tuple[object, ...] = ()
+        if source_id is not None:
+            conditions = "WHERE sources.id = ?"
+            parameters = (source_id,)
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT folders.id, folders.source_id, sources.path AS source_path,
+                           folders.path, folders.name, count(occurrences.id) AS message_count
+                    FROM folders
+                    JOIN sources ON sources.id = folders.source_id
+                    LEFT JOIN occurrences ON occurrences.folder_id = folders.id
+                    """
+                    + conditions
+                    + """
+                    GROUP BY folders.id, folders.source_id, sources.path,
+                             folders.path, folders.name
+                    ORDER BY sources.path, folders.path
+                    """,
+                    parameters,
+                )
+            )
+
+    def archive_messages(
+        self,
+        query: str = "",
+        *,
+        source_id: int | None = None,
+        folder_id: int | None = None,
+        has_attachments: bool = False,
+        deleted_only: bool = False,
+        item_type: str | None = None,
+        include_duplicates: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[sqlite3.Row]:
+        """List indexed occurrences with optional archive-browser filters."""
+        if limit <= 0 or offset < 0:
+            raise ValueError("Archive pagination values are invalid")
+        filters: list[str] = []
+        parameters: list[object] = []
+        if query.strip():
+            filters.append("messages_fts MATCH ?")
+            parameters.append(query)
+        if source_id is not None:
+            filters.append("sources.id = ?")
+            parameters.append(source_id)
+        if folder_id is not None:
+            filters.append("folders.id = ?")
+            parameters.append(folder_id)
+        if has_attachments:
+            filters.append(
+                "EXISTS (SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
+            )
+        if deleted_only:
+            filters.append("occurrences.deleted = 1")
+        if item_type is not None:
+            filters.append("occurrences.item_type = ?")
+            parameters.append(item_type)
+        where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+        fts_join = (
+            "JOIN messages_fts ON messages_fts.rowid = messages.id"
+            if query.strip()
+            else ""
+        )
+        duplicate_filter = "" if include_duplicates else "AND ranked.copy_number = 1"
+        parameters.extend((limit, offset))
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    WITH matched AS (
+                        SELECT messages.id AS message_id, messages.subject,
+                               messages.sent_date, messages.message_id AS internet_message_id,
+                               messages.thread_key, messages.content_hash,
+                               occurrences.id AS occurrence_id, occurrences.source_id,
+                               occurrences.folder_id, occurrences.locator_offset,
+                               occurrences.locator_length, occurrences.locator_folder_path,
+                               occurrences.locator_item_index, occurrences.locator_item_id,
+                               occurrences.message_hash, occurrences.deleted,
+                               occurrences.item_type, occurrences.error,
+                               sources.path AS source_path, sources.kind AS source_kind,
+                               sources.sha256_after, folders.path AS folder_path,
+                               folders.name AS folder_name,
+                               (SELECT group_concat(address, ', ')
+                                FROM participants
+                                WHERE participants.message_id = messages.id
+                                  AND participants.role = 'from') AS sender,
+                               count(*) OVER (PARTITION BY messages.id) AS copy_count,
+                               row_number() OVER (
+                                   PARTITION BY messages.id ORDER BY occurrences.id
+                               ) AS copy_number
+                        FROM messages
+                        """
+                    + fts_join
+                    + """
+                        JOIN occurrences ON occurrences.message_id = messages.id
+                        JOIN sources ON sources.id = occurrences.source_id
+                        LEFT JOIN folders ON folders.id = occurrences.folder_id
+                        """
+                    + where_clause
+                    + """
+                    )
+                    SELECT * FROM matched AS ranked
+                    WHERE 1 = 1
+                    """
+                    + duplicate_filter
+                    + """
+                    ORDER BY sent_date IS NULL, sent_date DESC, message_id DESC,
+                             occurrence_id
+                    LIMIT ? OFFSET ?
+                    """,
+                    parameters,
+                )
+            )
+
+    def message_details(self, message_id: int) -> sqlite3.Row | None:
+        """Return indexed message headers and body for an archive selection."""
+        with self.connection() as connection:
+            return connection.execute(
+                """
+                SELECT id, subject, sent_date, message_id AS internet_message_id,
+                       thread_key, in_reply_to, references_header, body, content_hash
+                FROM messages WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+
+    def occurrences_for_message(self, message_id: int) -> list[sqlite3.Row]:
+        """Return source locators and integrity metadata for every message copy."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT occurrences.id, occurrences.source_id,
+                           sources.path AS source_path, sources.kind AS source_kind,
+                           sources.size AS source_size, sources.discovered_sha256,
+                           sources.sha256_after, sources.status,
+                           folders.path AS folder_path, folders.name AS folder_name,
+                           occurrences.locator_offset, occurrences.locator_length,
+                           occurrences.locator_folder_path,
+                           occurrences.locator_item_index, occurrences.locator_item_id,
+                           occurrences.message_hash, occurrences.deleted,
+                           occurrences.item_type, occurrences.error
+                    FROM occurrences
+                    JOIN sources ON sources.id = occurrences.source_id
+                    LEFT JOIN folders ON folders.id = occurrences.folder_id
+                    WHERE occurrences.message_id = ?
+                    ORDER BY occurrences.id
+                    """,
+                    (message_id,),
+                )
+            )
+
     def message_count(self) -> int:
         """Return the number of unique indexed messages."""
         with self.connection() as connection:

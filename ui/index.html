@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="hu">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="author" content="Bálint Szabolcs">
+    <meta name="description" content="Helyi levélarchívum-böngésző és elemző.">
+    <title>Mail-Scope — levélarchívum</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Mail-Scope kezdőlap">
+          <span class="brand-mark" aria-hidden="true">M</span>
+          <span><strong>MAIL-SCOPE</strong><small>offline archívum</small></span>
+        </a>
+        <div class="sidebar-divider"></div>
+        <p class="eyebrow">MUNKATERÜLET</p>
+        <a class="side-link active" href="#case-panel"><span>01</span> Ügy és források</a>
+        <a class="side-link" href="#archive-panel"><span>02</span> Archívum böngésző</a>
+        <div class="sidebar-spacer"></div>
+        <div class="privacy-card">
+          <span class="privacy-dot"></span>
+          <div><strong>Helyi feldolgozás</strong><small>Az adatok nem hagyják el ezt a gépet.</small></div>
+        </div>
+        <p class="creator">Készítette: Bálint Szabolcs</p>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">MAIL-SCOPE / HELYI MUNKATERÜLET</p>
+            <h1 id="page-title">Ügy és források</h1>
+          </div>
+          <div class="case-summary">
+            <span class="status-light"></span>
+            <span id="case-label">Nincs megnyitott ügy</span>
+          </div>
+        </header>
+
+        <section class="panel case-panel" id="case-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">00 / MUNKAMENET</p>
+              <h2>Ügy és források</h2>
+              <p class="muted">Az index és minden saját adat az ügy mappájának <code>.mailscope</code> almappájába kerül.</p>
+            </div>
+            <div class="case-stat"><strong id="message-count">0</strong><span>indexelt levél</span></div>
+          </div>
+
+          <form id="case-form" class="inline-form">
+            <label class="field grow">
+              <span>Ügymappa teljes elérési útja</span>
+              <input id="case-path" name="path" type="text" placeholder="Például: E:\Ügyek\2026-014" required>
+            </label>
+            <button class="button primary" type="submit">Ügy megnyitása</button>
+          </form>
+
+          <div class="source-workflow">
+            <form id="discover-form" class="inline-form">
+              <label class="field grow">
+                <span>Postafiókfájl vagy bejárandó mappa</span>
+                <input id="source-path" name="path" type="text" placeholder="PST, OST, MBOX, EML vagy mappa elérési útja" required>
+              </label>
+              <button id="discover-button" class="button secondary" type="submit">Források felismerése</button>
+            </form>
+            <div id="discovered-panel" class="discovered-panel hidden">
+              <div class="list-heading">
+                <div><h3>Felismerhető források</h3><span id="discovered-count" class="muted"></span></div>
+                <button id="index-button" class="button primary" type="button">Indexelés indítása</button>
+              </div>
+              <div id="discovered-list" class="source-list"></div>
+            </div>
+          </div>
+
+          <div class="indexing-panel">
+            <div class="list-heading">
+              <div><h3>Ügy forrásai</h3><span class="muted">SHA-256 és indexelési állapot</span></div>
+              <button id="cancel-button" class="button quiet hidden" type="button">Megszakítás</button>
+            </div>
+            <div id="job-progress" class="progress-panel hidden"></div>
+            <div id="registered-sources" class="source-list empty-state">Előbb nyisson meg egy ügyet.</div>
+          </div>
+          <p id="case-notice" class="notice" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel archive-panel" id="archive-panel">
+          <div class="section-heading archive-heading">
+            <div>
+              <p class="eyebrow">01 / VIZSGÁLAT</p>
+              <h2>Archívum böngésző</h2>
+              <p class="muted">A lista indexelt adatokat mutat; a kiválasztott levél az ellenőrzött eredeti forrásból nyílik meg.</p>
+            </div>
+          </div>
+          <form id="archive-filters" class="filter-bar">
+            <label class="field search-field">
+              <span>Teljes szövegű keresés</span>
+              <input id="archive-query" type="search" placeholder="Keresés az indexelt levélben">
+            </label>
+            <label class="field">
+              <span>Forrás</span>
+              <select id="source-filter"><option value="">Minden forrás</option></select>
+            </label>
+            <label class="field">
+              <span>Mappa</span>
+              <select id="folder-filter"><option value="">Minden mappa</option></select>
+            </label>
+            <label class="field">
+              <span>Elemtípus</span>
+              <select id="type-filter">
+                <option value="">Minden típus</option><option value="mail">Levél</option>
+                <option value="contact">Névjegy</option><option value="calendar">Naptár</option>
+                <option value="task">Feladat</option><option value="note">Jegyzet</option>
+              </select>
+            </label>
+            <button class="button secondary search-button" type="submit">Keresés</button>
+            <label class="check-filter"><input id="attachment-filter" type="checkbox"> Mellékletes</label>
+            <label class="check-filter"><input id="deleted-filter" type="checkbox"> Törölt (nem tömörített)</label>
+            <label class="check-filter"><input id="duplicates-filter" type="checkbox"> Duplikátumok mutatása</label>
+          </form>
+
+          <div class="archive-layout">
+            <div class="message-column">
+              <div class="list-heading">
+                <h3>Levelek <span id="archive-result-count" class="muted"></span></h3>
+                <button id="load-more-button" class="button quiet hidden" type="button">Továbbiak betöltése</button>
+              </div>
+              <div id="message-list" class="message-list empty-state">Válasszon vagy indexeljen egy ügyet.</div>
+            </div>
+            <article id="reader-pane" class="reader-pane">
+              <div class="reader-empty">
+                <span class="reader-icon" aria-hidden="true">↳</span>
+                <h3>Válasszon ki egy levelet</h3>
+                <p>A levél fejlécei és törzse közvetlenül az eredeti, változatlanságra ellenőrzött forrásból töltődik be.</p>
+              </div>
+            </article>
+          </div>
+        </section>
+        <footer class="page-footer">Mail-Scope · offline levélvizsgáló · Bálint Szabolcs</footer>
+      </main>
+    </div>
+  </body>
+</html>
