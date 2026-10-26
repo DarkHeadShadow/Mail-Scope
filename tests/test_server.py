@@ -62,7 +62,9 @@ class ServerTests(unittest.TestCase):
         """Set up an isolated case, synthetic source, and application state."""
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
+        # Resolve 8.3 short names (e.g. C:\Users\RUNNER~1 on CI runners): the
+        # application stores resolved case paths and tests compare with them.
+        self.root = Path(self.temporary_directory.name).resolve()
         self.case_directory = self.root / "Ugy"
         self.source_path = self.root / "teszt.mbox"
         self.source_bytes = _fixture_mbox()
