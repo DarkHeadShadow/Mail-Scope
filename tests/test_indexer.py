@@ -5,6 +5,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from email import policy
 from email.message import EmailMessage
@@ -658,6 +659,72 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(len(set(keys[:4])), 4)
         self.assertEqual(keys[4], keys[5])
 
+    def test_user_writes_during_background_indexing_neither_fail_nor_wait(self) -> None:
+        """Index 5000 messages while people and labels are written concurrently."""
+        message_count = 5000
+        lines = []
+        for index in range(message_count):
+            lines.append(
+                (
+                    f"From sender@example.test Sat Jan  1 00:00:00 2022\n"
+                    f"From: Teszt Antal <antal@pelda.hu>\n"
+                    f"To: Teszt Anna <anna@pelda.hu>\n"
+                    f"Subject: Terheléses teszt {index}\n"
+                    f"Date: Sat, 1 Jan 2022 00:00:00 +0000\n"
+                    f"Message-ID: <terheles-{index}@pelda.hu>\n"
+                    f"\n"
+                    f"Kitalált törzs a {index}. levélhez, szerződés és egyeztetés.\n"
+                    f"{'Ismételt kitalált szöveg. ' * 20}\n"
+                ).encode("utf-8")
+            )
+        mailbox = self.case_directory / "terheles.mbox"
+        mailbox.write_bytes(b"".join(lines))
+        job = self.service.start(discover_sources(mailbox))
+
+        durations: list[float] = []
+        people_during_indexing = 0
+        labels_during_indexing = 0
+        person_number = 0
+        while not job.wait(0.05):
+            person_number += 1
+            started = time.perf_counter()
+            self.database.create_person(
+                f"Teszt Személy {person_number}", (f"szemely{person_number}@pelda.hu",)
+            )
+            durations.append(time.perf_counter() - started)
+            if not job.wait(0):
+                people_during_indexing += 1
+            with self.database.connection() as connection:
+                message_ids = tuple(
+                    int(row["id"])
+                    for row in connection.execute("SELECT id FROM messages ORDER BY id LIMIT 5")
+                )
+            if message_ids:
+                started = time.perf_counter()
+                self.database.set_message_label(message_ids, "Fontos", enabled=True)
+                durations.append(time.perf_counter() - started)
+                if not job.wait(0):
+                    labels_during_indexing += 1
+
+        summary = job.result()
+        self.assertEqual(summary.status, "completed")
+        self.assertEqual(summary.messages_indexed, message_count)
+        self.assertEqual(self.database.message_count(), message_count)
+        self.assertGreaterEqual(people_during_indexing, 10)
+        self.assertGreaterEqual(labels_during_indexing, 1)
+        self.assertLess(max(durations), 2.0)
+
+    def test_user_write_reports_a_busy_database_in_hungarian(self) -> None:
+        """Give up after the user-write timeout with a readable message."""
+        from indexer import DatabaseBusyError
+
+        with patch("indexer.database.USER_WRITE_TIMEOUT_SECONDS", 0.2):
+            with self.database.connection(write=True):
+                started = time.perf_counter()
+                with self.assertRaisesRegex(DatabaseBusyError, "Az indexelés éppen ír"):
+                    self.database.create_person("Teszt Antal", ("antal@pelda.hu",))
+                self.assertLess(time.perf_counter() - started, 2.0)
+
     def test_one_failing_source_does_not_stop_the_others(self) -> None:
         """Record an unreadable source as failed and continue with the next one."""
         broken = self.case_directory / "a-broken.mbox"
@@ -713,8 +780,13 @@ class IndexerTests(unittest.TestCase):
         self.assertEqual(len(self.database.archive_messages("szerződés")), 1)
         self.assertEqual(len(self.database.archive_messages('"a szerződést"')), 1)
         self.assertEqual(len(self.database.archive_messages("szerződés NOT aláírva")), 0)
-        # Operators without any searchable word behave like an empty query.
-        self.assertEqual(len(self.database.archive_messages("((( OR")), 1)
+        # Text without any searchable word is rejected instead of matching everything.
+        for meaningless in ("((( OR", '"('):
+            with self.assertRaisesRegex(ValueError, "nincs kereshető szó"):
+                self.database.archive_messages(meaningless)
+            with self.assertRaisesRegex(ValueError, "nincs kereshető szó"):
+                self.database.search(meaningless)
+        self.assertEqual(len(self.database.archive_messages("   ")), 1)
         self.assertEqual(len(self.database.archive_messages('szerz* AND "')), 1)
         rows, total = self.database.detailed_search(
             ({"field": "text", "value": "szerződés"},), operator="AND"

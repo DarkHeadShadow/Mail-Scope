@@ -2,11 +2,12 @@
 
 __author__ = "Bálint Szabolcs"
 
-from .database import IndexDatabase
+from .database import DatabaseBusyError, IndexDatabase
 from .people import Person, PersonDirectory, PersonSuggestion
 from .service import IndexingJob, IndexingService
 
 __all__ = [
+    "DatabaseBusyError",
     "IndexDatabase",
     "IndexingJob",
     "IndexingService",

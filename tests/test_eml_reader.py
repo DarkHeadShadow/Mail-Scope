@@ -101,7 +101,8 @@ class EmlReaderTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 reader.open_message_bytes(
-                    MessageLocator(offset=0, length=10, folder_path="..\\notes.json")
+                    # Built with pathlib so the separator matches the running OS.
+                    MessageLocator(offset=0, length=10, folder_path=str(Path("..") / "notes.json"))
                 )
 
     def test_reads_headers_and_opens_attachment_on_demand(self) -> None:

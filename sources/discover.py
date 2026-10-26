@@ -7,6 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 PST_SIGNATURE = b"!BDN"
@@ -32,6 +33,7 @@ EML_KNOWN_HEADERS = {
 EML_REQUIRED_HEADERS = {b"from", b"date", b"subject", b"message-id", b"received"}
 
 FileSignature = tuple[int, ...]
+HashProgress = Callable[[int, int], None]
 
 
 @dataclass(frozen=True)
@@ -121,12 +123,14 @@ def eml_files(directory: Path) -> list[Path]:
     )
 
 
-def sha256_file(path: str | Path) -> str:
+def sha256_file(path: str | Path, progress: Callable[[int], None] | None = None) -> str:
     """Hash a file in bounded memory without writing to it."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as source:
         while chunk := source.read(HASH_CHUNK_SIZE):
             digest.update(chunk)
+            if progress is not None:
+                progress(len(chunk))
     return digest.hexdigest()
 
 
@@ -141,24 +145,41 @@ def source_signature(path: str | Path, kind: str) -> FileSignature:
     return (len(signature), *signature)
 
 
-def sha256_source(path: str | Path, kind: str) -> str:
-    """Hash a source file, or an EML directory through a manifest of file hashes."""
+def sha256_source(
+    path: str | Path, kind: str, progress: HashProgress | None = None
+) -> str:
+    """Hash a source file, or an EML directory through a manifest of file hashes.
+
+    ``progress`` receives the hashed and the total byte count.
+    """
     source_path = Path(path)
+    files = [source_path] if kind != "emldir" else eml_files(source_path)
+    total = sum(file.stat().st_size for file in files)
+    done = 0
+
+    def advance(size: int) -> None:
+        nonlocal done
+        done += size
+        if progress is not None:
+            progress(done, total)
+
     if kind != "emldir":
-        return sha256_file(source_path)
+        return sha256_file(source_path, advance)
     digest = hashlib.sha256()
-    for file in eml_files(source_path):
+    for file in files:
         digest.update(file.name.encode("utf-8"))
         digest.update(b"\t")
-        digest.update(sha256_file(file).encode("ascii"))
+        digest.update(sha256_file(file, advance).encode("ascii"))
         digest.update(b"\n")
     return digest.hexdigest()
 
 
-def hash_source(path: str | Path, kind: str) -> tuple[str, FileSignature]:
+def hash_source(
+    path: str | Path, kind: str, progress: HashProgress | None = None
+) -> tuple[str, FileSignature]:
     """Hash a source and return the signature that was stable during hashing."""
     before = source_signature(path, kind)
-    sha256 = sha256_source(path, kind)
+    sha256 = sha256_source(path, kind, progress)
     after = source_signature(path, kind)
     if before != after:
         raise OSError(f"A forrás a hash-elés közben megváltozott: {path}")

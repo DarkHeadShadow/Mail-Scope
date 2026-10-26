@@ -17,6 +17,7 @@
       <div class="welcome-fog welcome-fog-top" aria-hidden="true"></div>
       <div class="welcome-fog welcome-fog-left" aria-hidden="true"></div>
       <div class="welcome-fog welcome-fog-glow" aria-hidden="true"></div>
+      <div class="welcome-fog welcome-fog-bottom" aria-hidden="true"></div>
       <div class="welcome-content">
         <header class="welcome-header">
           <div class="welcome-brand">
@@ -152,6 +153,34 @@
             <div id="job-progress" class="progress-panel hidden"></div>
             <div id="registered-sources" class="source-list empty-state">Előbb nyisson meg egy ügyet.</div>
           </div>
+          <section id="verification-setting" class="verification-setting" aria-labelledby="verification-setting-title">
+            <div class="list-heading">
+              <div><h3 id="verification-setting-title">Forrásellenőrzés levélmegnyitás előtt</h3><span id="verification-decision" class="muted"></span></div>
+            </div>
+            <p id="verification-prompt" class="verification-prompt" hidden>
+              Ebben az ügyben még nincs döntés arról, hogyan ellenőrizze a program a forrásokat a levelek megnyitása és exportja előtt. Válasszon az alábbi két lehetőség közül; a döntésig a gyors mód érvényes.
+            </p>
+            <fieldset class="verification-options">
+              <legend>Ellenőrzési mód ebben az ügyben</legend>
+              <label class="verification-option">
+                <input type="radio" name="verification-mode" value="signature">
+                <span>
+                  <strong>Gyors: aláírás-ellenőrzés</strong>
+                  <small>Megnyitáskor csak a méretet, a módosítási időt és a fájlazonosítót veti össze az utolsó teljes hash-eléskor rögzítettel. Teljes SHA-256 felismeréskor, indexelés után, a fájl változásakor és a „Teljes újraellenőrzés” gombra készül.</small>
+                  <small><b>Következmény:</b> a levelek azonnal megnyílnak. Ha valaki a forrást úgy módosítja, hogy a méretet és a módosítási időt is visszaállítja, azt csak a következő teljes ellenőrzés mutatja ki; ezért bizonyítási célra export előtt érdemes a „Teljes újraellenőrzés” gombot használni.</small>
+                </span>
+              </label>
+              <label class="verification-option">
+                <input type="radio" name="verification-mode" value="full">
+                <span>
+                  <strong>Szigorú: teljes SHA-256 minden megnyitás előtt</strong>
+                  <small>Minden levél megnyitása előtt a teljes forrásfájl SHA-256-ja újraszámolódik; exportnál forrásonként egyszer.</small>
+                  <small><b>Következmény:</b> minden megnyitott és exportált levélhez friss, teljes ellenőrzés tartozik, és a manifest „teljes SHA-256 újraszámítás” módot rögzít. Nagy forrásnál viszont minden megnyitás lassú; közben a felület többi része használható. <span id="verification-estimate"></span></small>
+                </span>
+              </label>
+            </fieldset>
+            <button id="verification-save" class="button secondary" type="button">Döntés mentése</button>
+          </section>
           <p id="case-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
 
@@ -268,6 +297,7 @@
             <label class="check-filter"><input id="deleted-filter" type="checkbox"> Törölt (nem tömörített)</label>
             <label class="check-filter"><input id="duplicates-filter" type="checkbox"> Duplikátumok mutatása</label>
           </form>
+          <p id="archive-notice" class="notice" role="status" aria-live="polite"></p>
 
           <div class="archive-layout">
             <div class="message-column">

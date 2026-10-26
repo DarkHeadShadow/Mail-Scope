@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -14,11 +15,14 @@ from sources.discover import DiscoveredSource, hash_source, source_signature
 from sources.models import MessageMetadata, SourceReader
 from sources.reader_factory import open_source
 
-from .database import IndexDatabase
+from .database import IndexDatabase, is_busy_error
 
 
 logger = logging.getLogger(__name__)
 COMMIT_BATCH_SIZE = 500
+COMMIT_INTERVAL_SECONDS = 1.0
+BATCH_LOCK_TIMEOUT_SECONDS = 5
+BATCH_WRITE_ATTEMPTS = 5
 _REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd|vs)\s*:\s*)+", re.IGNORECASE)
 _MESSAGE_ID = re.compile(r"<([^<>]+)>")
 
@@ -157,67 +161,40 @@ class IndexingService:
 
                 reader = reader_factory(source)
                 try:
-                    with self.database.connection() as connection:
+                    with self.database.connection(write=True) as connection:
                         folders = {
                             folder.path: self.database.add_folder(
                                 source_id, folder.path, folder.name, connection=connection
                             )
                             for folder in reader.iter_folders()
                         }
-                        connection.commit()
-                        last_locator = self.database.last_locator(source_id)
-                        report("indexing", source_number, source_path)
+                    last_locator = self.database.last_locator(source_id)
+                    report("indexing", source_number, source_path)
 
-                        pending = 0
-                        for metadata in reader.iter_messages(after_locator=last_locator):
-                            if cancellation.is_set():
-                                break
-
-                            messages_scanned += 1
-                            folder_id = folders.get(metadata.folder)
-                            if folder_id is None:
-                                folder_id = self.database.add_folder(
-                                    source_id,
-                                    metadata.folder,
-                                    metadata.folder.rsplit("/", 1)[-1],
-                                    connection=connection,
-                                )
-                                folders[metadata.folder] = folder_id
-
-                            dedup_key, thread_key, normalized_subject, content_hash = (
-                                _message_keys(source_id, metadata)
-                            )
-                            inserted = self.database.store_message(
-                                source_id=source_id,
-                                folder_id=folder_id,
-                                metadata=metadata,
-                                dedup_key=dedup_key,
-                                thread_key=thread_key,
-                                normalized_subject=normalized_subject,
-                                content_hash=content_hash,
-                                message_hash=content_hash,
-                                parent_ids=tuple(
-                                    _parent_ids(
-                                        metadata.references,
-                                        metadata.in_reply_to,
-                                        metadata.message_id,
-                                    )
-                                ),
-                                subject_fallback=_is_reply_subject(metadata.subject),
-                                connection=connection,
-                            )
-                            if inserted:
-                                messages_indexed += 1
-                            else:
-                                messages_skipped += 1
-                            pending += 1
-                            # Commit in batches: a resumed job repeats at most
-                            # one batch, which store_message skips as duplicates.
-                            if pending >= COMMIT_BATCH_SIZE:
-                                connection.commit()
-                                pending = 0
-
-                            report("indexing", source_number, source_path, metadata.subject)
+                    # Messages are parsed without holding the write lock and
+                    # written in short IMMEDIATE transactions: after 500
+                    # messages or about one second, whichever comes first.
+                    batch: list[MessageMetadata] = []
+                    batch_started = time.monotonic()
+                    for metadata in reader.iter_messages(after_locator=last_locator):
+                        if cancellation.is_set():
+                            break
+                        messages_scanned += 1
+                        batch.append(metadata)
+                        if (
+                            len(batch) >= COMMIT_BATCH_SIZE
+                            or time.monotonic() - batch_started >= COMMIT_INTERVAL_SECONDS
+                        ):
+                            indexed, skipped = self._write_batch(source_id, folders, batch)
+                            messages_indexed += indexed
+                            messages_skipped += skipped
+                            batch = []
+                            batch_started = time.monotonic()
+                        report("indexing", source_number, source_path, metadata.subject)
+                    if batch:
+                        indexed, skipped = self._write_batch(source_id, folders, batch)
+                        messages_indexed += indexed
+                        messages_skipped += skipped
                 finally:
                     reader.close()
                 self.database.resolve_address_aliases()
@@ -297,6 +274,79 @@ class IndexingService:
             messages_skipped=messages_skipped,
             sources_failed=sources_failed,
         )
+
+    def _write_batch(
+        self,
+        source_id: int,
+        folders: dict[str, int],
+        batch: list[MessageMetadata],
+    ) -> tuple[int, int]:
+        """Store one batch in a single transaction, retrying on lock contention.
+
+        A failed attempt rolls back completely, so a retry repeats the whole
+        batch. Only a persistent lock or a non-lock error is raised.
+        """
+        delay = 0.1
+        for attempt in range(1, BATCH_WRITE_ATTEMPTS + 1):
+            new_folders: dict[str, int] = {}
+            indexed = 0
+            skipped = 0
+            try:
+                with self.database.connection(
+                    write=True, timeout=BATCH_LOCK_TIMEOUT_SECONDS
+                ) as connection:
+                    for metadata in batch:
+                        folder_id = folders.get(metadata.folder) or new_folders.get(metadata.folder)
+                        if folder_id is None:
+                            folder_id = self.database.add_folder(
+                                source_id,
+                                metadata.folder,
+                                metadata.folder.rsplit("/", 1)[-1],
+                                connection=connection,
+                            )
+                            new_folders[metadata.folder] = folder_id
+                        dedup_key, thread_key, normalized_subject, content_hash = (
+                            _message_keys(source_id, metadata)
+                        )
+                        inserted = self.database.store_message(
+                            source_id=source_id,
+                            folder_id=folder_id,
+                            metadata=metadata,
+                            dedup_key=dedup_key,
+                            thread_key=thread_key,
+                            normalized_subject=normalized_subject,
+                            content_hash=content_hash,
+                            message_hash=content_hash,
+                            parent_ids=tuple(
+                                _parent_ids(
+                                    metadata.references,
+                                    metadata.in_reply_to,
+                                    metadata.message_id,
+                                )
+                            ),
+                            subject_fallback=_is_reply_subject(metadata.subject),
+                            connection=connection,
+                        )
+                        if inserted:
+                            indexed += 1
+                        else:
+                            skipped += 1
+            except Exception as error:
+                if not is_busy_error(error) or attempt == BATCH_WRITE_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Database busy while writing %d messages (attempt %d/%d); retrying in %.1f s",
+                    len(batch),
+                    attempt,
+                    BATCH_WRITE_ATTEMPTS,
+                    delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+                continue
+            folders.update(new_folders)
+            return indexed, skipped
+        raise AssertionError("unreachable")
 
     def _hash_before(self, source: DiscoveredSource) -> str:
         """Hash a source, reusing the discovery hash while its file signature is unchanged."""

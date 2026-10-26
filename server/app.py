@@ -24,7 +24,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from indexer import IndexDatabase, IndexingJob, IndexingService, PersonDirectory
+from indexer import (
+    DatabaseBusyError,
+    IndexDatabase,
+    IndexingJob,
+    IndexingService,
+    PersonDirectory,
+)
 from sources.models import MessageLocator, SourceReader
 from sources.content import message_body_text
 from sources.discover import (
@@ -57,6 +63,8 @@ _UI_FILES = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 _MAX_RECENT_CASES = 5
+VERIFICATION_MODES = {"signature", "full"}
+_VERIFICATION_MODE_KEY = "verification_mode"
 _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
 
@@ -125,6 +133,7 @@ class MailScopeApplication:
         self._verified_sources: dict[str, tuple[tuple[int, ...], str]] = {}
         self._hash_locks: dict[str, threading.Lock] = {}
         self._readers: dict[tuple[str, str], SourceReader] = {}
+        self._verifications: dict[int, dict[str, Any]] = {}
         self.case_log: Path | None = None
 
     def select_case(self, path: str) -> dict[str, Any]:
@@ -150,6 +159,7 @@ class MailScopeApplication:
             self._discovered.clear()
             self._verified_sources.clear()
             self._close_readers()
+            self._verifications = {}
             self.job = None
             self._recent_counts = None
             return self.status()
@@ -241,6 +251,9 @@ class MailScopeApplication:
                     except RuntimeError as error:
                         job_data["error"] = str(error.__cause__ or error)
             sources = [_row_json(row) for row in self.database.sources()]
+            for source in sources:
+                verification = self._verifications.get(int(source["id"]))
+                source["verification"] = None if verification is None else dict(verification)
             message_count = self.database.message_count()
             if self._recent_counts != (len(sources), message_count):
                 self._recent_counts = (len(sources), message_count)
@@ -255,7 +268,23 @@ class MailScopeApplication:
                 "sources": sources,
                 "message_count": message_count,
                 "job": job_data,
+                "verification_mode": self.database.metadata_value(_VERIFICATION_MODE_KEY),
             }
+
+    def set_verification_mode(self, mode: str) -> dict[str, Any]:
+        """Store the case's decision on how sources are checked before opening.
+
+        "signature" accepts the last full hash while size, modification time
+        and file identity are unchanged; "full" re-hashes the whole source
+        before every message open (once per source and export).
+        """
+        if mode not in VERIFICATION_MODES:
+            raise ValueError("Az ellenőrzési mód signature vagy full legyen.")
+        with self._lock:
+            database = self._require_case()
+            database.set_metadata_value(_VERIFICATION_MODE_KEY, mode)
+            logger.info("Source verification mode for this case set to: %s", mode)
+            return self.status()
 
     def recent_cases(self) -> list[dict[str, Any]]:
         """Return up to five recently opened case folders that still exist."""
@@ -482,12 +511,18 @@ class MailScopeApplication:
             "Mail-Scope EML export",
             f"Mail-Scope {__version__} – készítő: Bálint Szabolcs",
             "",
-            "fájl\tSHA-256\teredet\tforrásfájl\tforrás SHA-256\thely a forrásban",
+            "fájl\tSHA-256\teredet\tforrásfájl\tforrás SHA-256\thely a forrásban"
+            "\tforrás-ellenőrzés az export előtt\tutolsó teljes ellenőrzés (UTC)",
         ]
+        # In strict mode each source is fully hashed once per export, not once
+        # per exported message.
+        export_checks: dict[str, tuple[tuple[int, ...], str]] = {}
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
             total_raw_bytes = 0
             for index, (message_id, subject) in enumerate(messages, start=1):
-                opened = self.open_message(message_id, include_raw=True)
+                opened = self.open_message(
+                    message_id, include_raw=True, export_checks=export_checks
+                )
                 raw = opened["raw_eml"]
                 total_raw_bytes += len(raw)
                 if total_raw_bytes > 256 * 1024 * 1024:
@@ -513,6 +548,12 @@ class MailScopeApplication:
                             source["path"],
                             source["sha256"],
                             source["location"],
+                            (
+                                "teljes SHA-256 újraszámítás"
+                                if source["check"] == "full"
+                                else "aláírás-ellenőrzés (méret, módosítási idő, fájlazonosító)"
+                            ),
+                            source["last_full_check"] or "ismeretlen",
                         )
                     )
                 )
@@ -761,7 +802,11 @@ class MailScopeApplication:
         )
 
     def open_message(
-        self, message_id: int, *, include_raw: bool = False
+        self,
+        message_id: int,
+        *,
+        include_raw: bool = False,
+        export_checks: dict[str, tuple[tuple[int, ...], str]] | None = None,
     ) -> dict[str, Any]:
         """Load a selected message from its original source after hash verification."""
         with self._lock:
@@ -784,8 +829,12 @@ class MailScopeApplication:
         # Verification may hash a multi-gigabyte source; it runs outside the
         # application lock so that status and browsing requests keep working.
         try:
-            actual_hash = self._verified_source_hash(
-                database, source_path, source_kind
+            actual_hash, check_mode = self._verified_source_hash(
+                database,
+                source_path,
+                source_kind,
+                int(occurrence["source_id"]),
+                export_checks=export_checks,
             )
         except OSError as error:
             raise ApiError(
@@ -849,12 +898,20 @@ class MailScopeApplication:
                 "opened_from_occurrence": int(occurrence["id"]),
             }
             if include_raw:
+                source_row = database.source_by_id(int(occurrence["source_id"]))
                 result["raw_eml"] = raw_eml
                 result["raw_source"] = {
                     "reconstructed": source_kind in {"pst", "ost"},
                     "path": str(source_path),
                     "sha256": expected_hash,
-                    "location": _locator_text(locator),
+                    "location": _locator_text(
+                        locator,
+                        exported_length=len(raw_eml) if source_kind == "mbox" else None,
+                    ),
+                    "check": check_mode,
+                    "last_full_check": (
+                        None if source_row is None else source_row["verified_at"]
+                    ),
                 }
             return result
 
@@ -882,33 +939,138 @@ class MailScopeApplication:
             self._close_readers()
 
     def _verified_source_hash(
-        self, database: IndexDatabase, source_path: Path, kind: str
-    ) -> str:
-        """Return a source's SHA-256, re-hashing only when its file signature changed.
+        self,
+        database: IndexDatabase,
+        source_path: Path,
+        kind: str,
+        source_id: int,
+        *,
+        export_checks: dict[str, tuple[tuple[int, ...], str]] | None = None,
+    ) -> tuple[str, str]:
+        """Return a source's SHA-256 and how it was established.
 
-        A full hash recorded at indexing or at an earlier open stays valid
-        while size, modification time and file identity are unchanged.
+        The mode is "signature" when the size, modification time and file
+        identity still match the last full hash, and "full" when the source
+        was hashed again, because its signature changed or the case requires
+        a full check before every open.
         """
         path_key = str(source_path.resolve())
         current = source_signature(source_path, kind)
+        if database.metadata_value(_VERIFICATION_MODE_KEY) == "full":
+            if export_checks is not None:
+                checked = export_checks.get(path_key)
+                if checked is not None and checked[0] == current:
+                    return checked[1], "full"
+            with self._lock:
+                hash_lock = self._hash_locks.setdefault(path_key, threading.Lock())
+            with hash_lock:
+                logger.info("Strict mode: full SHA-256 before opening: %s", source_path)
+                actual_hash, signature = hash_source(source_path, kind)
+                self._record_full_check(database, source_id, source_path, actual_hash, signature)
+            if export_checks is not None:
+                export_checks[path_key] = (signature, actual_hash)
+            return actual_hash, "full"
         cached = self._verified_sources.get(path_key)
         if cached is not None and cached[0] == current:
-            return cached[1]
+            return cached[1], "signature"
         stored = database.verified_source(path_key)
         if stored is not None and stored[1] == current:
             self._verified_sources[path_key] = (current, stored[0])
-            return stored[0]
+            return stored[0], "signature"
         with self._lock:
             hash_lock = self._hash_locks.setdefault(path_key, threading.Lock())
         with hash_lock:
             cached = self._verified_sources.get(path_key)
             if cached is not None and cached[0] == source_signature(source_path, kind):
-                return cached[1]
+                return cached[1], "signature"
             logger.info("Verifying source SHA-256 before opening: %s", source_path)
             actual_hash, signature = hash_source(source_path, kind)
             logger.info("Source SHA-256 on open: %s %s", source_path, actual_hash)
-            self._verified_sources[path_key] = (signature, actual_hash)
-            return actual_hash
+            self._record_full_check(database, source_id, source_path, actual_hash, signature)
+            return actual_hash, "full"
+
+    def _record_full_check(
+        self,
+        database: IndexDatabase,
+        source_id: int,
+        source_path: Path,
+        sha256: str,
+        signature: tuple[int, ...],
+    ) -> bool:
+        """Persist a full hash in the case database and log its outcome."""
+        path_key = str(source_path.resolve())
+        try:
+            matches = database.record_full_check(source_id, sha256, signature)
+        except DatabaseBusyError:
+            logger.warning("Full source check could not be recorded (database busy): %s", source_path)
+            matches = None
+        if matches is False:
+            self._verified_sources.pop(path_key, None)
+            logger.error(
+                "Full SHA-256 check FAILED, source marked as changed: %s sha256=%s",
+                source_path,
+                sha256,
+            )
+        else:
+            self._verified_sources[path_key] = (signature, sha256)
+            logger.info("Full SHA-256 check matched: %s sha256=%s", source_path, sha256)
+        return bool(matches)
+
+    def start_full_verification(self, source_id: int) -> dict[str, Any]:
+        """Re-hash one source completely in the background and record the result."""
+        with self._lock:
+            database = self._require_case()
+            row = database.source_by_id(source_id)
+            if row is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "A forrás nem található az ügyben.")
+            current = self._verifications.get(source_id)
+            if current is not None and current["running"]:
+                raise ApiError(HTTPStatus.CONFLICT, "Ennek a forrásnak az ellenőrzése már fut.")
+            source_path = Path(str(row["path"]))
+            if not source_path.exists():
+                raise ApiError(HTTPStatus.CONFLICT, "A forrásfájl nem érhető el.")
+            state: dict[str, Any] = {
+                "running": True,
+                "done_bytes": 0,
+                "total_bytes": int(row["size"]),
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "result": None,
+                "sha256": None,
+                "error": None,
+            }
+            self._verifications[source_id] = state
+            threading.Thread(
+                target=self._run_full_verification,
+                args=(database, source_id, source_path, str(row["kind"]), state),
+                name=f"Mail-Scope verify {source_id}",
+                daemon=True,
+            ).start()
+            return dict(state)
+
+    def _run_full_verification(
+        self,
+        database: IndexDatabase,
+        source_id: int,
+        source_path: Path,
+        kind: str,
+        state: dict[str, Any],
+    ) -> None:
+        """Hash a source, store the outcome, and expose progress through status."""
+        def progress(done: int, total: int) -> None:
+            state["done_bytes"] = done
+            state["total_bytes"] = total
+
+        logger.info("Full re-verification started: %s", source_path)
+        try:
+            sha256, signature = hash_source(source_path, kind, progress)
+            matches = self._record_full_check(database, source_id, source_path, sha256, signature)
+            state["sha256"] = sha256
+            state["result"] = "match" if matches else "mismatch"
+        except Exception as error:
+            logger.exception("Full re-verification failed: %s", source_path)
+            state["error"] = str(error)
+        finally:
+            state["running"] = False
 
     def _require_case(self) -> IndexDatabase:
         """Return the selected database or report that case setup is required."""
@@ -1108,12 +1270,21 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.start_index(paths)
             elif path == "/api/index/cancel":
                 response = self.server.application.cancel_index()
+            elif path == "/api/settings/verification":
+                response = self.server.application.set_verification_mode(
+                    _required_string(payload, "mode")
+                )
+            elif re.fullmatch(r"/api/sources/\d+/verify", path):
+                source_id = _positive_integer(path.split("/")[3])
+                response = self.server.application.start_full_verification(source_id)
             else:
                 self._send_error(HTTPStatus.NOT_FOUND, "A kért útvonal nem található.")
                 return
             self._send_json(HTTPStatus.OK, response)
         except ApiError as error:
             self._send_error(error.status, str(error))
+        except DatabaseBusyError as error:
+            self._send_error(HTTPStatus.SERVICE_UNAVAILABLE, str(error))
         except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as error:
             self._send_error(HTTPStatus.BAD_REQUEST, str(error))
         except OSError as error:
@@ -1465,11 +1636,21 @@ def _optional_path(path: Path | None) -> str | None:
     return None if path is None else str(path)
 
 
-def _locator_text(locator: MessageLocator) -> str:
-    """Describe where a message lives inside its source file."""
+def _locator_text(locator: MessageLocator, *, exported_length: int | None = None) -> str:
+    """Describe where a message lives inside its source file.
+
+    For MBOX, the indexed byte range includes the "From " envelope line,
+    which the exported EML leaves out.
+    """
     if locator.folder_path is not None and locator.item_index is not None:
         return f"{locator.folder_path} #{locator.item_index}"
-    return f"bájt {locator.offset}, hossz {locator.length}"
+    text = f"bájt {locator.offset}, hossz {locator.length}"
+    if exported_length is not None:
+        envelope = locator.length - exported_length
+        text += (
+            f" (benne a {envelope} bájtos „From ” borítéksor; az EML {exported_length} bájt)"
+        )
+    return text
 
 
 def _internal_error_message() -> str:

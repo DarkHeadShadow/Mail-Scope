@@ -16,6 +16,23 @@ from sources.models import MessageLocator, MessageMetadata
 
 
 SUBJECT_THREAD_WINDOW_SECONDS = 60 * 86400
+USER_WRITE_TIMEOUT_SECONDS = 5
+NO_SEARCH_WORD_MESSAGE = "A keresőkifejezésben nincs kereshető szó."
+BUSY_MESSAGE = "Az indexelés éppen ír az adatbázisba, próbálja újra néhány másodperc múlva."
+
+
+class DatabaseBusyError(RuntimeError):
+    """The case database write lock could not be obtained in time."""
+
+
+def is_busy_error(error: BaseException) -> bool:
+    """Recognize SQLite lock contention, as opposed to other database failures."""
+    if isinstance(error, DatabaseBusyError):
+        return True
+    message = str(error).casefold()
+    return isinstance(error, sqlite3.OperationalError) and (
+        "locked" in message or "busy" in message
+    )
 _FTS_TOKEN = re.compile(r'"([^"]*)"?|(\()|(\))|([^\s"()]+)')
 _FTS_WORD = re.compile(r"\w+", re.UNICODE)
 _FTS_OPERATORS = {"AND", "OR", "NOT"}
@@ -179,20 +196,44 @@ class IndexDatabase:
         return cls(Path(case_directory) / ".mailscope" / "index.sqlite3")
 
     @contextmanager
-    def connection(self) -> Generator[sqlite3.Connection, None, None]:
-        """Yield a foreign-key-aware connection with explicit transaction handling."""
-        connection = sqlite3.connect(self.path, timeout=30)
+    def connection(
+        self, *, write: bool = False, timeout: float = 30
+    ) -> Generator[sqlite3.Connection, None, None]:
+        """Yield a foreign-key-aware connection with explicit transaction handling.
+
+        ``write=True`` starts the transaction with ``BEGIN IMMEDIATE``, so the
+        write lock is taken up front. A deferred transaction that reads first
+        cannot become a writer in WAL mode once another connection has
+        written, and the busy timeout does not help in that case. When the
+        lock is not available within ``timeout`` seconds, DatabaseBusyError
+        is raised.
+        """
+        connection = sqlite3.connect(
+            self.path, timeout=timeout, isolation_level=None if write else ""
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.create_function(
             "casefold", 1, _sqlite_casefold, deterministic=True
         )
+        if write:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as error:
+                connection.close()
+                if is_busy_error(error):
+                    raise DatabaseBusyError(BUSY_MESSAGE) from error
+                raise
         try:
             yield connection
-            connection.commit()
+            if write:
+                connection.execute("COMMIT")
+            else:
+                connection.commit()
         except Exception:
-            connection.rollback()
+            if connection.in_transaction:
+                connection.rollback()
             raise
         finally:
             connection.close()
@@ -263,10 +304,9 @@ class IndexDatabase:
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(sources)")
                 }
-                if "verified_signature" not in source_columns:
-                    connection.execute(
-                        "ALTER TABLE sources ADD COLUMN verified_signature TEXT"
-                    )
+                for column in ("verified_signature", "verified_at", "last_check_result"):
+                    if column not in source_columns:
+                        connection.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
                 schema_version = connection.execute(
                     "SELECT value FROM app_metadata WHERE key = 'schema_version'"
                 ).fetchone()
@@ -305,7 +345,7 @@ class IndexDatabase:
     ) -> tuple[int, bool]:
         """Register a source and return its ID and whether it was already complete."""
         normalized_path = str(Path(path).resolve())
-        with self.connection() as connection:
+        with self.connection(write=True) as connection:
             existing = connection.execute(
                 """
                 SELECT id, discovered_sha256, sha256_before, status
@@ -367,12 +407,14 @@ class IndexDatabase:
         verified_signature: tuple[int, ...] | None = None,
     ) -> None:
         """Persist the indexing result and final source integrity hash."""
-        with self.connection() as connection:
+        with self.connection(write=True) as connection:
             connection.execute(
                 """
                 UPDATE sources
                 SET status = ?, sha256_after = ?, last_error = ?,
                     verified_signature = ?,
+                    verified_at = CASE WHEN ? IS NULL THEN verified_at ELSE ? END,
+                    last_check_result = CASE WHEN ? IS NULL THEN last_check_result ELSE ? END,
                     indexed_count = (
                         SELECT count(*) FROM occurrences WHERE source_id = ?
                     ),
@@ -384,10 +426,67 @@ class IndexDatabase:
                     sha256_after,
                     error,
                     None if verified_signature is None else json.dumps(verified_signature),
+                    # A final hash is always a full SHA-256 of the source.
+                    sha256_after,
+                    _utc_now(),
+                    sha256_after,
+                    "mismatch" if status == "source_changed" else "match",
                     source_id,
                     source_id,
                 ),
             )
+
+    def source_by_id(self, source_id: int) -> sqlite3.Row | None:
+        """Return one registered source with its integrity fields."""
+        with self.connection() as connection:
+            return connection.execute(
+                """
+                SELECT id, path, kind, size, discovered_sha256, sha256_after,
+                       status, verified_at, last_check_result
+                FROM sources WHERE id = ?
+                """,
+                (source_id,),
+            ).fetchone()
+
+    def record_full_check(
+        self,
+        source_id: int,
+        sha256: str,
+        signature: tuple[int, ...],
+    ) -> bool:
+        """Store a full SHA-256 check; a mismatch marks the source as changed."""
+        with self.connection(write=True) as connection:
+            row = connection.execute(
+                "SELECT discovered_sha256 FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown source: {source_id}")
+            matches = str(row["discovered_sha256"]) == sha256
+            if matches:
+                connection.execute(
+                    """
+                    UPDATE sources
+                    SET verified_at = ?, last_check_result = 'match',
+                        verified_signature = ?, sha256_after = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (_utc_now(), json.dumps(signature), sha256, source_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE sources
+                    SET verified_at = ?, last_check_result = 'mismatch',
+                        verified_signature = NULL, sha256_after = ?,
+                        status = 'source_changed',
+                        last_error = 'Full re-verification found a different SHA-256.',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (_utc_now(), sha256, source_id),
+                )
+        return matches
 
     def verified_source(self, path: str) -> tuple[str, tuple[int, ...]] | None:
         """Return the last full hash of a source and the file signature it matched."""
@@ -412,7 +511,7 @@ class IndexDatabase:
         different subjects, the reply headers do not describe a conversation,
         so the messages are regrouped by normalized subject.
         """
-        with self.connection() as connection:
+        with self.connection(write=True) as connection:
             thread_keys = [
                 str(row["thread_key"])
                 for row in connection.execute(
@@ -442,7 +541,7 @@ class IndexDatabase:
 
     def resolve_address_aliases(self) -> int:
         """Rewrite Exchange legacy addresses to SMTP wherever a mapping is known."""
-        with self.connection() as connection:
+        with self.connection(write=True) as connection:
             cursor = connection.execute(
                 """
                 UPDATE OR IGNORE participants
@@ -473,7 +572,7 @@ class IndexDatabase:
     ) -> int:
         """Insert or retrieve a source folder by its reader-relative path."""
         if connection is None:
-            with self.connection() as owned_connection:
+            with self.connection(write=True) as owned_connection:
                 return self.add_folder(
                     source_id, path, name, connection=owned_connection
                 )
@@ -614,7 +713,7 @@ class IndexDatabase:
         """
         locator = metadata.locator
         context = (
-            self.connection() if connection is None else nullcontext(connection)
+            self.connection(write=True) if connection is None else nullcontext(connection)
         )
         with context as connection:
             existing_occurrence = connection.execute(
@@ -869,7 +968,7 @@ class IndexDatabase:
             raise ValueError("Search result limit must be positive")
         if person_ids is not None and not person_ids:
             return []
-        match = fts_query(query)
+        match = optional_fts_query(query)
         if not match:
             return []
         person_filter = ""
@@ -918,7 +1017,7 @@ class IndexDatabase:
                     """
                     SELECT id, path, kind, size, discovered_sha256,
                            sha256_before, sha256_after, status, last_error,
-                           indexed_count
+                           indexed_count, verified_at, last_check_result
                     FROM sources ORDER BY path
                     """
                 )
@@ -986,7 +1085,7 @@ class IndexDatabase:
             return clauses, values
 
         filters, parameters = occurrence_filters("occurrences")
-        match = fts_query(query)
+        match = optional_fts_query(query)
         if match:
             filters.append(
                 "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
@@ -1132,7 +1231,7 @@ class IndexDatabase:
                     )
                     match = fts_query(value)
                     if not match:
-                        raise ValueError("A szöveges keresés nem tartalmaz kereshető szót.")
+                        raise ValueError(NO_SEARCH_WORD_MESSAGE)
                     parameters.append(match)
                 else:
                     expression_parts.append(
@@ -1332,7 +1431,7 @@ class IndexDatabase:
         ):
             raise ValueError("At least one valid message ID must be selected")
         placeholders = ", ".join("?" for _ in message_ids)
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             if enabled:
                 connection.execute(
                     f"""
@@ -1386,7 +1485,7 @@ class IndexDatabase:
         query_json = json.dumps(query, ensure_ascii=False, sort_keys=True)
         if len(query_json) > 16384:
             raise ValueError("A saved search must be 16 KB or smaller")
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             connection.execute(
                 """
                 INSERT INTO saved_searches(name, query_json)
@@ -1400,7 +1499,7 @@ class IndexDatabase:
 
     def delete_saved_search(self, name: str) -> bool:
         """Delete a named search and report whether it existed."""
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
                 "DELETE FROM saved_searches WHERE name = ?", (name,)
             )
@@ -1412,6 +1511,7 @@ class IndexDatabase:
             return connection.execute(
                 """
                 SELECT messages.id, messages.subject, messages.sent_date,
+                       messages.sent_timestamp,
                        messages.message_id AS internet_message_id,
                        messages.thread_key, messages.in_reply_to,
                        messages.references_header,
@@ -1523,7 +1623,7 @@ class IndexDatabase:
             parameters.extend(person_ids)
             parameters.extend(person_ids)
             parameters.extend(person_ids)
-        match = fts_query(query)
+        match = optional_fts_query(query)
         if match:
             filters.append(
                 "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
@@ -1700,6 +1800,17 @@ class IndexDatabase:
                 )
             )
 
+    def set_metadata_value(self, key: str, value: str) -> None:
+        """Persist one case-level setting in the application metadata table."""
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
+            connection.execute(
+                """
+                INSERT INTO app_metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )
+
     def metadata_value(self, key: str) -> str | None:
         """Return a persisted application metadata value, if present."""
         with self.connection() as connection:
@@ -1716,7 +1827,7 @@ class IndexDatabase:
         if not normalized_name:
             raise ValueError("Person display name must not be empty")
         normalized_addresses = _normalize_addresses(addresses)
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
                 "INSERT INTO people(display_name) VALUES (?)",
                 (normalized_name,),
@@ -1735,7 +1846,7 @@ class IndexDatabase:
         normalized_address = _normalize_address(address)
         if not normalized_address:
             raise ValueError("Email address must not be empty")
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             self._assign_address(
                 connection,
                 person_id,
@@ -1779,7 +1890,7 @@ class IndexDatabase:
     def remove_address(self, person_id: int, address: str) -> bool:
         """Unassign an address from a person and report whether it existed."""
         normalized_address = _normalize_address(address)
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
                 "DELETE FROM person_addresses WHERE person_id = ? AND address = ?",
                 (person_id, normalized_address),
@@ -1791,7 +1902,7 @@ class IndexDatabase:
         normalized_name = display_name.strip()
         if not normalized_name:
             raise ValueError("Person display name must not be empty")
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
                 "UPDATE people SET display_name = ? WHERE id = ?",
                 (normalized_name, person_id),
@@ -1803,7 +1914,7 @@ class IndexDatabase:
         """Move source aliases into a target person and remove the source record."""
         if target_id == source_id:
             raise ValueError("A person cannot be merged into itself")
-        with self.connection() as connection:
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             people = connection.execute(
                 "SELECT id FROM people WHERE id IN (?, ?)",
                 (target_id, source_id),
@@ -1885,6 +1996,11 @@ class IndexDatabase:
             )
 
 
+def _utc_now() -> str:
+    """Return the current UTC time as an ISO 8601 timestamp."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _normalize_address(address: str) -> str:
     """Normalize an email address for identity matching."""
     return address.strip().casefold()
@@ -1964,6 +2080,20 @@ def fts_query(text: str) -> str:
     if not any(item.startswith('"') for item in cleaned):
         return ""
     return " ".join(cleaned)
+
+
+def optional_fts_query(text: str) -> str:
+    """Translate an optional search box value; reject text with no searchable word.
+
+    An empty box means "no text filter". Text such as "(" that contains no
+    searchable word is an error rather than a request for every message.
+    """
+    if not text.strip():
+        return ""
+    match = fts_query(text)
+    if not match:
+        raise ValueError(NO_SEARCH_WORD_MESSAGE)
+    return match
 
 
 @contextmanager

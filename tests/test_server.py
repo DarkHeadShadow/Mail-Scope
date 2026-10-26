@@ -7,6 +7,7 @@ import http.client
 import json
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from email import policy
@@ -161,6 +162,141 @@ class ServerTests(unittest.TestCase):
             [entry["path"] for entry in json.loads(response.read())],
             [str(second.resolve()), str(first.resolve())],
         )
+
+    def _index_fixture_source(self) -> int:
+        """Open a case, index the fixture MBOX, and return its source ID."""
+        self.application.select_case(str(self.case_directory))
+        source = self.application.discover(str(self.source_path))[0]
+        self.application.start_index([source["path"]])
+        assert self.application.job is not None
+        self.assertTrue(self.application.job.wait(5))
+        return int(self.application.status()["sources"][0]["id"])
+
+    def _wait_for_verification(self, source_id: int) -> dict:
+        """Poll status until the background full check of a source finishes."""
+        for _ in range(100):
+            source = next(
+                item for item in self.application.status()["sources"] if item["id"] == source_id
+            )
+            if source["verification"] and not source["verification"]["running"]:
+                return source
+            time.sleep(0.05)
+        self.fail("Full verification did not finish")
+
+    def test_full_reverification_records_hash_time_and_detects_changes(self) -> None:
+        """Re-hash a source in the background and mark a modified file as changed."""
+        source_id = self._index_fixture_source()
+        expected = hashlib.sha256(self.source_path.read_bytes()).hexdigest()
+
+        started = self.application.start_full_verification(source_id)
+        self.assertTrue(started["running"])
+        source = self._wait_for_verification(source_id)
+
+        self.assertEqual(source["verification"]["result"], "match")
+        self.assertEqual(source["verification"]["sha256"], expected)
+        self.assertEqual(source["verification"]["done_bytes"], len(self.source_bytes))
+        self.assertEqual(source["last_check_result"], "match")
+        self.assertRegex(source["verified_at"], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertEqual(source["status"], "completed")
+        case_log_text = "Full SHA-256 check matched"
+        with self.assertLogs("server.app", level="INFO") as logs:
+            self.application.start_full_verification(source_id)
+            self._wait_for_verification(source_id)
+        self.assertTrue(any(case_log_text in line for line in logs.output))
+
+        self.source_path.write_bytes(self.source_bytes + b"\nmodositott\n")
+        self.application.start_full_verification(source_id)
+        source = self._wait_for_verification(source_id)
+
+        self.assertEqual(source["verification"]["result"], "mismatch")
+        self.assertEqual(source["status"], "source_changed")
+        self.assertEqual(source["last_check_result"], "mismatch")
+        message_id = int(
+            self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=False,
+                deleted_only=False, item_type=None, include_duplicates=False,
+                limit=1, offset=0,
+            )[0]["message_id"]
+        )
+        with self.assertRaises(ApiError) as raised:
+            self.application.open_message(message_id)
+        self.assertEqual(raised.exception.status, 409)
+
+    def test_verification_mode_is_a_recorded_case_decision(self) -> None:
+        """Ask per case; strict mode hashes before every open and once per export source."""
+        source_id = self._index_fixture_source()
+        self.assertIsNone(self.application.status()["verification_mode"])
+        with self.assertRaises(ValueError):
+            self.application.set_verification_mode("sometimes")
+        message_id = int(
+            self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=False,
+                deleted_only=False, item_type=None, include_duplicates=False,
+                limit=1, offset=0,
+            )[0]["message_id"]
+        )
+
+        self.assertEqual(
+            self.application.set_verification_mode("signature")["verification_mode"], "signature"
+        )
+        with patch("server.app.hash_source", wraps=hash_source) as hashing:
+            self.application.open_message(message_id)
+            self.assertEqual(hashing.call_count, 0)
+
+        self.application.set_verification_mode("full")
+        reopened = MailScopeApplication()
+        reopened.select_case(str(self.case_directory))
+        self.assertEqual(reopened.status()["verification_mode"], "full")
+        with patch("server.app.hash_source", wraps=hash_source) as hashing:
+            self.application.open_message(message_id)
+            self.application.open_message(message_id)
+            self.assertEqual(hashing.call_count, 2)
+            archive = self.application._eml_zip([(message_id, "a"), (message_id, "b")])
+            self.assertEqual(hashing.call_count, 3)
+        with zipfile.ZipFile(BytesIO(archive)) as exported:
+            self.assertIn("teljes SHA-256 újraszámítás", exported.read("MANIFEST.txt").decode("utf-8"))
+        self.assertEqual(
+            next(s for s in self.application.status()["sources"] if s["id"] == source_id)[
+                "last_check_result"
+            ],
+            "match",
+        )
+
+    def test_full_reverification_http_route(self) -> None:
+        """Start a full check through the same-origin POST route."""
+        source_id = self._index_fixture_source()
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        connection.request(
+            "POST",
+            f"/api/sources/{source_id}/verify",
+            body="{}",
+            headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"},
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.read())["running"])
+        source = self._wait_for_verification(source_id)
+        self.assertEqual(
+            source["verification"]["sha256"],
+            hashlib.sha256(self.source_path.read_bytes()).hexdigest(),
+        )
+        connection.request(
+            "POST",
+            "/api/sources/999/verify",
+            body="{}",
+            headers={"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"},
+        )
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 404)
 
     def test_refuses_to_open_a_source_changed_after_indexing(self) -> None:
         """Prevent stale indexed locators from reading a modified source file."""
@@ -768,7 +904,16 @@ class ServerTests(unittest.TestCase):
         with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
             names = archive.namelist()
             self.assertEqual(len(names), 3)
-            self.assertIn("eredeti forrásbájtok", archive.read("MANIFEST.txt").decode("utf-8"))
+            provenance = archive.read("MANIFEST.txt").decode("utf-8")
+            self.assertIn("eredeti forrásbájtok", provenance)
+            envelope_length = len(b"From sender@example.test Sat Jan  1 00:00:00 2022\n")
+            self.assertIn(
+                f"bájt 0, hossz {envelope_length + len(raw_eml)} "
+                f"(benne a {envelope_length} bájtos „From ” borítéksor; az EML {len(raw_eml)} bájt)",
+                provenance,
+            )
+            self.assertIn("aláírás-ellenőrzés (méret, módosítási idő, fájlazonosító)", provenance)
+            self.assertRegex(provenance, r"\t\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\n")
             eml_name = next(name for name in names if name.endswith(".eml"))
             exported_message = archive.read(eml_name)
             manifest = archive.read("SHA256SUMS.txt").decode("utf-8")

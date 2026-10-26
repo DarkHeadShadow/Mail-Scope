@@ -112,6 +112,21 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; }
 }
 .source-row:first-child { border-top: 0; }
 .source-row input { accent-color: var(--green); }
+.source-integrity { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; grid-column: 2 / -1; color: var(--muted); font-size: 10px; }
+.source-check.error { color: var(--red); }
+.verification-setting { margin-top: 20px; padding-top: 17px; border-top: 1px solid var(--line); }
+.verification-setting.undecided { padding: 14px; border: 1px solid #8a6d2c; border-radius: 7px; background: #1d1a10; }
+.verification-prompt { margin: 10px 0 0; color: #f2d58a; font-size: 11px; line-height: 1.6; }
+.verification-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px 0; padding: 0; border: 0; }
+.verification-options legend { margin-bottom: 8px; color: #a3b2a9; font-size: 10px; }
+.verification-option { display: flex; align-items: flex-start; gap: 9px; padding: 11px; border: 1px solid #26362d; border-radius: 6px; background: #0e1511; cursor: pointer; }
+.verification-option:has(input:checked) { border-color: #4b755c; background: #132019; }
+.verification-option input { margin-top: 2px; accent-color: var(--green); }
+.verification-option strong { display: block; color: #dce8df; font-size: 11px; }
+.verification-option small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.verification-option b { color: #c8d6cd; font-weight: 600; }
+@media (max-width: 720px) { .verification-options { grid-template-columns: 1fr; } }
+.source-integrity progress { width: 160px; height: 8px; accent-color: var(--green); }
 .source-path { overflow: hidden; color: #d5dfd9; text-overflow: ellipsis; white-space: nowrap; }
 .source-kind, .source-status { color: var(--muted); text-transform: uppercase; }
 .source-hash { overflow: hidden; color: #82948a; font-family: Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
@@ -159,7 +174,8 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; }
 [hidden] { display: none !important; }
 body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
 .page-heading:focus { outline: none; }
-.page-heading:focus-visible { outline: 2px solid var(--green); outline-offset: 4px; }
+.page-heading:focus-visible, .page-heading.keyboard-focus:focus { outline: 1px dashed rgba(124, 224, 164, .6); outline-offset: 4px; border-radius: 3px; }
+.page-heading.pointer-focus:focus-visible { outline: none; }
 
 @media (max-width: 1000px) {
   .sidebar { width: 190px; }
@@ -350,7 +366,12 @@ body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
 .recent-case-name { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .recent-case-meta, .recent-case-when { color: #a3b8ac; font-size: 13px; }
 .recent-case-when { font-family: "IBM Plex Mono", Consolas, monospace; font-size: 12px; white-space: nowrap; }
-.welcome-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; color: #a3b8ac; font-size: 13px; }
+.welcome-footer {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 0 -18px; padding: 10px 18px; border-radius: 10px; color: #a3b8ac;
+  background: rgba(5, 8, 7, .88); font-size: 13px;
+}
+.welcome-fog-bottom { background: linear-gradient(to top, rgba(5, 8, 7, .95) 0%, rgba(5, 8, 7, .7) 9%, rgba(5, 8, 7, 0) 22%); }
 .welcome-offline { display: flex; align-items: center; gap: 8px; }
 
 .ms-pulse { fill: none; stroke-linecap: round; animation-timing-function: linear; animation-iteration-count: infinite; }
@@ -380,7 +401,7 @@ body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
   .welcome-path-form { flex-direction: column; align-items: stretch; }
   .welcome-fog-left { background: rgba(5, 8, 7, .82); }
   .recent-case { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .welcome-footer { flex-direction: column; align-items: flex-start; }
+  .welcome-footer { flex-direction: column; align-items: flex-start; margin: 0; }
 }
 
 @media print {

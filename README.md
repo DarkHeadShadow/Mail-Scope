@@ -23,7 +23,11 @@ Mail-Scope is an offline, local-first mail archive browser and analysis tool. It
 
 - Mail-Scope does not upload data or use external services, CDNs, or network resources.
 - The local server binds to `127.0.0.1` only.
-- Source archives are opened read-only. Their SHA-256 is computed at discovery and again after indexing. Before a message is read or exported, the source's file signature (size, modification time, file identity) is compared with the one recorded at the last full hash; if it differs, the source is hashed again and refused when the hash changed.
+- Source archives are opened read-only. Integrity checks have two levels:
+  - **Full SHA-256 calculation** happens at discovery, after indexing, whenever the source's file signature (size, modification time, file identity) differs from the one recorded at the last full hash, and when you press **Teljes újraellenőrzés** next to a source on the **Ügy és források** page. The re-check runs in the background with a progress bar; its result and time are stored in the case database and the case log, and a different hash marks the source as `source_changed`, after which its messages are no longer opened or exported.
+  - **Signature check only** happens on every other message open or export: if size, modification time and file identity still match, the last full hash is accepted without reading the whole file. A modification time can be set back deliberately, so use **Teljes újraellenőrzés** when you need a fresh full proof.
+  - Each case asks you to decide on the **Ügy és források** page between the fast mode above and a **strict mode**, which re-hashes the whole source before every message open (once per source and export). Strict mode gives a fresh full check for every opened or exported message, but on large PST/OST files each open can take minutes; the page shows an estimate for the case's largest source. Until you decide, the fast mode applies.
+  - Each source row shows “Utolsó teljes ellenőrzés: <date, time>”, and every EML ZIP `MANIFEST.txt` records, per message, whether a full hash or only a signature check preceded the export, and when the source was last fully hashed.
 - Indexing stores locators and searchable metadata rather than extracting complete mailboxes to disk. MBOX/EML exports preserve the source message bytes (excluding the MBOX envelope line); PST/OST exports reconstruct an EML from available headers, MAPI properties, body, and attachment data.
 - Each manifest hash is calculated over the exact EML bytes written into the ZIP. PST/OST files do not contain a single original RFC 5322 message byte stream, so their EML is a reconstruction, not a byte-for-byte original. Every ZIP contains `SHA256SUMS.txt` and a `MANIFEST.txt` that marks each entry as original source bytes or a PST/OST reconstruction, with its source file, source SHA-256, and location.
 - Use only fictional data in tests and screenshots. Never add real mail, mailbox files, credentials, or personal data to this repository.
@@ -99,6 +103,10 @@ All screenshots use only fictional mailbox data and names (Teszt Antal, Teszt An
 Welcome screen:
 
 ![Mail-Scope welcome screen with recent fictional cases](./docs/screenshots/welcome.png)
+
+Case sources with the last full check and the **Teljes újraellenőrzés** button:
+
+![Mail-Scope case sources with integrity status](./docs/screenshots/sources.png)
 
 Archive browser with an opened message and its forensic data:
 

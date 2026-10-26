@@ -22,6 +22,29 @@ const state = {
 
 const element = (id) => document.getElementById(id);
 
+/**
+ * Format a moment as "YYYY-MM-DD HH:MM" in the computer's local time zone.
+ */
+function formatLocalDateTime(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/**
+ * Format an indexed UTC Unix timestamp, or report a missing date.
+ */
+function formatTimestamp(seconds) {
+  return Number.isFinite(seconds) ? formatLocalDateTime(new Date(seconds * 1000)) : "Dátum nélkül";
+}
+
+/**
+ * Local calendar day ("YYYY-MM-DD") of a moment, used for timeline grouping.
+ */
+function localDay(date) {
+  return formatLocalDateTime(date).slice(0, 10);
+}
+
 /** Workspace pages, in sidebar and Ctrl+1…5 order. */
 const ROUTES = {
   ugy: { panel: "case-panel", title: "Ügy és források" },
@@ -79,9 +102,23 @@ function showRoute() {
   state.route = route;
   if (changed) {
     window.scrollTo(0, 0);
-    element(`${ROUTES[route].panel}-title`).focus({ preventScroll: true });
+    const heading = element(`${ROUTES[route].panel}-title`);
+    // Focus moves to the heading for screen readers; the visible ring is
+    // kept for keyboard navigation only.
+    heading.classList.toggle("pointer-focus", state.lastInput === "pointer");
+    // Chromium does not treat Ctrl+number as keyboard modality for
+    // :focus-visible, so keyboard switches are marked explicitly.
+    heading.classList.toggle("keyboard-focus", state.lastInput === "keyboard");
+    heading.focus({ preventScroll: true });
   }
 }
+
+state.lastInput = "keyboard";
+document.addEventListener("pointerdown", () => { state.lastInput = "pointer"; }, true);
+document.addEventListener("keydown", () => { state.lastInput = "keyboard"; }, true);
+document.addEventListener("focusout", (event) => {
+  if (event.target instanceof HTMLElement) event.target.classList.remove("pointer-focus", "keyboard-focus");
+});
 
 /**
  * Disable every page except the case page until a case is open.
@@ -336,7 +373,62 @@ function sourceRow(source, selectable = false) {
   hash.title = source.discovered_sha256 || source.sha256 || "";
   hash.textContent = source.discovered_sha256 || source.sha256 || "";
   row.append(path, kind, status, hash);
+  if (!selectable && source.id !== undefined) row.append(sourceIntegrity(source));
   return row;
+}
+
+/**
+ * Show the last full SHA-256 check of a registered source and offer a new one.
+ */
+function sourceIntegrity(source) {
+  const integrity = document.createElement("div");
+  integrity.className = "source-integrity";
+  const info = document.createElement("span");
+  info.className = "source-check";
+  const verification = source.verification;
+  const running = Boolean(verification && verification.running);
+  if (running) {
+    const percent = verification.total_bytes
+      ? Math.min(100, Math.floor((100 * verification.done_bytes) / verification.total_bytes))
+      : 0;
+    info.textContent = `Teljes ellenőrzés folyamatban: ${percent}%`;
+    const bar = document.createElement("progress");
+    bar.max = 100;
+    bar.value = percent;
+    bar.setAttribute("aria-label", `${source.path} teljes ellenőrzése`);
+    integrity.append(info, bar);
+  } else {
+    const results = { match: "egyezik", mismatch: "ELTÉR – a forrás megváltozott" };
+    info.textContent = source.verified_at
+      ? `Utolsó teljes ellenőrzés: ${formatLocalDateTime(new Date(source.verified_at))} · ${results[source.last_check_result] || "ismeretlen eredmény"}`
+      : "Utolsó teljes ellenőrzés: még nem volt";
+    info.classList.toggle("error", source.last_check_result === "mismatch");
+    integrity.append(info);
+    if (verification && verification.error) {
+      const failure = document.createElement("span");
+      failure.className = "source-check error";
+      failure.textContent = `Az ellenőrzés nem sikerült: ${verification.error}`;
+      integrity.append(failure);
+    }
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "button quiet";
+  button.textContent = "Teljes újraellenőrzés";
+  button.title = "A teljes forrás SHA-256 újraszámítása a háttérben";
+  button.disabled = running;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await requestJson(`/api/sources/${source.id}/verify`, { method: "POST", body: "{}" });
+      await refreshStatus();
+    } catch (error) {
+      showNotice(error.message, true);
+      button.disabled = false;
+    }
+  });
+  integrity.append(button);
+  return integrity;
 }
 
 /**
@@ -526,7 +618,7 @@ function renderDetailedResults() {
       const subject = document.createElement("strong");
       subject.textContent = message.subject || "(nincs tárgy)";
       const meta = document.createElement("span");
-      meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${message.sent_date || "Dátum nélkül"} · ${message.source_path}`;
+      meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${formatTimestamp(message.sent_timestamp)} · ${message.source_path}`;
       open.append(subject, meta);
       open.addEventListener("click", () => {
         navigate("archivum");
@@ -704,7 +796,7 @@ async function printDetailedSearchReport() {
     reportRows.forEach((message) => {
       const row = document.createElement("tr");
       [
-        message.sent_date || "",
+        Number.isFinite(message.sent_timestamp) ? formatTimestamp(message.sent_timestamp) : "",
         message.subject || "(nincs tárgy)",
         message.sender || "",
         message.source_path || "",
@@ -788,7 +880,9 @@ function renderStatus(status) {
       progress.textContent = `Indexelés ${statusNames[job.summary.status] || job.summary.status}: ${job.summary.messages_indexed} új levél, ${job.summary.messages_skipped} kihagyva.${failed}`;
     }
   }
-  if (job && job.running && !state.pollTimer) {
+  renderVerificationSetting(status);
+  const verifying = state.sources.some((source) => source.verification && source.verification.running);
+  if (((job && job.running) || verifying) && !state.pollTimer) {
     state.pollTimer = window.setTimeout(async () => {
       state.pollTimer = null;
       await refreshStatus();
@@ -800,10 +894,74 @@ function renderStatus(status) {
       state.lastPeopleRefresh = summaryKey;
       refreshFolders();
       refreshPeople();
+      refreshArchive();
     }
-    refreshArchive();
   }
 }
+
+/** Measured full-hash throughput on a typical local disk, used for estimates. */
+const HASH_BYTES_PER_SECOND = 140 * 1024 * 1024;
+
+/**
+ * Show the case's verification decision, ask for it while it is missing,
+ * and estimate what strict mode costs for the largest source.
+ */
+function renderVerificationSetting(status) {
+  const section = element("verification-setting");
+  const mode = status.verification_mode;
+  const undecided = Boolean(status.case) && !mode;
+  section.classList.toggle("undecided", undecided);
+  element("verification-prompt").hidden = !undecided;
+  element("verification-decision").textContent = mode === "full"
+    ? "· döntés: szigorú (teljes SHA-256 minden megnyitás előtt)"
+    : mode === "signature"
+      ? "· döntés: gyors (aláírás-ellenőrzés)"
+      : "· még nincs döntés (addig gyors mód)";
+  if (!state.verificationDirty) {
+    document.querySelectorAll('input[name="verification-mode"]').forEach((radio) => {
+      radio.checked = radio.value === (mode || "");
+    });
+  }
+  const largest = state.sources.reduce((max, source) => Math.max(max, source.size || 0), 0);
+  const seconds = largest / HASH_BYTES_PER_SECOND;
+  const duration = seconds < 1
+    ? "1 másodpercnél rövidebb"
+    : seconds < 90
+      ? `kb. ${Math.round(seconds)} másodperc`
+      : `kb. ${Math.round(seconds / 60).toLocaleString("hu-HU")} perc`;
+  element("verification-estimate").textContent = largest
+    ? `Ebben az ügyben a legnagyobb forrás ${formatBytes(largest)}; ennek teljes ellenőrzése egy átlagos lemezen ${duration} minden megnyitáskor.`
+    : "";
+}
+
+document.querySelectorAll('input[name="verification-mode"]').forEach((radio) => {
+  radio.addEventListener("change", () => { state.verificationDirty = true; });
+});
+element("verification-save").addEventListener("click", async () => {
+  const selected = document.querySelector('input[name="verification-mode"]:checked');
+  if (!selected) {
+    showNotice("Válassza ki az egyik ellenőrzési módot.", true);
+    return;
+  }
+  if (selected.value === "full" && !window.confirm(
+    "Szigorú módban minden levél megnyitása előtt a teljes forrásfájl SHA-256-ja újraszámolódik. "
+    + "Nagy PST/OST esetén ez megnyitásonként akár percekig tarthat. Bekapcsolja?",
+  )) {
+    return;
+  }
+  try {
+    state.verificationDirty = false;
+    renderStatus(await requestJson("/api/settings/verification", {
+      method: "POST",
+      body: JSON.stringify({ mode: selected.value }),
+    }));
+    showNotice(selected.value === "full"
+      ? "Szigorú ellenőrzés bekapcsolva: minden megnyitás előtt teljes SHA-256 készül."
+      : "Gyors ellenőrzés beállítva: megnyitáskor aláírás-ellenőrzés, teljes SHA-256 a megadott esetekben.");
+  } catch (error) {
+    showNotice(error.message, true);
+  }
+});
 
 /**
  * Refresh case state and the archive after a local API operation.
@@ -977,8 +1135,11 @@ async function refreshArchive(append = false) {
     renderMessages();
     element("archive-result-count").textContent = `· ${state.messages.length.toLocaleString("hu-HU")}`;
     element("load-more-button").classList.toggle("hidden", result.messages.length < 100);
+    element("archive-notice").textContent = "";
+    element("archive-notice").classList.remove("error");
   } catch (error) {
-    showNotice(error.message, true);
+    element("archive-notice").textContent = error.message;
+    element("archive-notice").classList.add("error");
   }
 }
 
@@ -1010,7 +1171,11 @@ function renderMessages() {
     sender.className = "message-sender";
     sender.textContent = message.sender || "Ismeretlen feladó";
     const date = document.createElement("time");
-    date.textContent = message.sent_date || "Dátum nélkül";
+    date.textContent = formatTimestamp(message.sent_timestamp);
+    if (Number.isFinite(message.sent_timestamp)) {
+      date.dateTime = new Date(message.sent_timestamp * 1000).toISOString();
+      date.title = message.sent_date || "";
+    }
     meta.append(sender, date);
     const folder = document.createElement("div");
     folder.className = "message-folder";
@@ -1069,7 +1234,10 @@ function renderMessageDetail(detail) {
     const label = document.createElement("strong");
     label.textContent = name.toUpperCase();
     const value = document.createElement("span");
-    value.textContent = detail.headers[name];
+    // The original Date header stays unchanged in the forensic block below.
+    value.textContent = name === "date" && Number.isFinite(detail.message.sent_timestamp)
+      ? formatTimestamp(detail.message.sent_timestamp)
+      : detail.headers[name];
     row.append(label, value);
     top.append(row);
   });
@@ -1095,6 +1263,7 @@ function renderMessageDetail(detail) {
       ["Forrásmappa", occurrence.folder_path || "—"],
       ["Lokátor", `eltolás ${occurrence.locator_offset}, hossz ${occurrence.locator_length}, elem ${occurrence.locator_item_id || occurrence.locator_item_index}`],
       ["Message-ID", detail.message.internet_message_id || "—"],
+      ["Date fejléc (eredeti)", detail.headers.date || "—"],
       ["Levél SHA-256", occurrence.message_hash],
       ["Forrás SHA-256", occurrence.discovered_sha256],
       ["Példány", `${occurrence.id}${occurrence.id === detail.opened_from_occurrence ? " · ebből nyílt meg" : ""}`],
@@ -1202,10 +1371,22 @@ function renderConversation(result) {
   summary.textContent = `${result.messages.length.toLocaleString("hu-HU")} levél · ${result.people.map((person) => person.display_name).join(" · ")}`;
   container.append(summary);
 
+  // Days, silences and months follow the computer's local time, like the
+  // displayed times; the server's UTC grouping would split local days.
+  const months = new Map();
+  result.messages.forEach((message) => {
+    message.localSent = message.sent_at ? new Date(message.sent_at) : null;
+    message.localDay = message.localSent ? localDay(message.localSent) : null;
+    if (message.localDay) {
+      const month = message.localDay.slice(0, 7);
+      months.set(month, (months.get(month) || 0) + 1);
+    }
+  });
+
   const activity = document.createElement("nav");
   activity.className = "activity-strip";
   activity.setAttribute("aria-label", "Havi levélaktivitás");
-  result.months.forEach((month) => {
+  [...months.entries()].sort().map(([month, count]) => ({ month, count })).forEach((month) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "activity-month";
@@ -1228,19 +1409,20 @@ function renderConversation(result) {
   const personColors = new Map(result.people.map((person, index) => [person.id, palette[index % palette.length]]));
   let currentDay = "";
   result.messages.forEach((message) => {
-    if (message.day && message.day !== currentDay) {
-      currentDay = message.day;
+    if (message.localDay && message.localDay !== currentDay) {
+      const silentDays = currentDay
+        ? Math.round((Date.parse(`${message.localDay}T12:00:00Z`) - Date.parse(`${currentDay}T12:00:00Z`)) / 86400000) - 1
+        : 0;
+      currentDay = message.localDay;
       const heading = document.createElement("h3");
       heading.className = "timeline-day";
-      heading.dataset.day = message.day;
-      heading.textContent = new Intl.DateTimeFormat("hu-HU", {
-        year: "numeric", month: "long", day: "numeric", timeZone: "UTC",
-      }).format(new Date(`${message.day}T12:00:00Z`));
+      heading.dataset.day = message.localDay;
+      heading.textContent = message.localDay;
       timeline.append(heading);
-      if (message.silent_days_before > 0) {
+      if (silentDays > 0) {
         const gap = document.createElement("div");
         gap.className = "silence-gap";
-        gap.textContent = `${message.silent_days_before} nap csend`;
+        gap.textContent = `${silentDays} nap csend`;
         timeline.append(gap);
       }
     }
@@ -1280,10 +1462,11 @@ function conversationCard(message, people, personColors) {
     ? `${sender.person_name} <${sender.address}>`
     : "Ismeretlen feladó";
   const time = document.createElement("time");
-  time.textContent = message.sent_at
-    ? new Intl.DateTimeFormat("hu-HU", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })
-      .format(new Date(message.sent_at))
-    : "Dátum nélkül";
+  time.textContent = message.localSent ? formatLocalDateTime(message.localSent) : "Dátum nélkül";
+  if (message.localSent) {
+    time.dateTime = message.sent_at;
+    time.title = message.sent_date || "";
+  }
   metadata.append(senderName, time);
   const otherParticipants = message.participants.filter((participant) =>
     participant.role !== "from"
@@ -1443,6 +1626,7 @@ async function openCase(path, noticeId) {
     notice.textContent = "";
     notice.classList.remove("error");
     element("case-path").value = status.case ? status.case.path : path;
+    state.verificationDirty = false;
     state.lastPeopleRefresh = "";
     state.people = [];
     state.folders = [];

@@ -23,7 +23,11 @@ A Mail-Scope offline, helyben futó levélnéző és -elemző program. Közvetle
 
 - A program nem tölt fel adatot, nem használ külső szolgáltatást, CDN-t vagy internetes erőforrást.
 - A helyi szerver kizárólag a `127.0.0.1` címen figyel.
-- A forrás-postafiókok csak olvashatók. A SHA-256 a felismeréskor és az indexelés után készül el. Levél megnyitása és exportja előtt a program a forrás fájlazonosítóját (méret, módosítási idő, fájlazonosító) összeveti az utolsó teljes hash-eléskor rögzítettel; eltérés esetén újra hash-el, és ha a hash megváltozott, megtagadja az olvasást.
+- A forrás-postafiókok csak olvashatók. Az ellenőrzésnek két szintje van:
+  - **Teljes SHA-256 számítás** történik felismeréskor, indexelés után, valahányszor a forrás fájlaláírása (méret, módosítási idő, fájlazonosító) eltér az utolsó teljes hash-eléskor rögzítettől, valamint ha az **Ügy és források** lapon a forrás melletti **Teljes újraellenőrzés** gombot választja. Az újraellenőrzés a háttérben, folyamatjelzővel fut; eredménye és időpontja az ügy adatbázisába és az ügynaplóba kerül. Eltérő hash esetén a forrás `source_changed` állapotba kerül, és leveleit a program többé nem nyitja meg és nem exportálja.
+  - **Csak aláírás-ellenőrzés** történik minden más megnyitáskor és exportkor: ha a méret, a módosítási idő és a fájlazonosító változatlan, a program a legutóbbi teljes hash-t fogadja el a teljes fájl beolvasása nélkül. A módosítási idő szándékosan visszaállítható, ezért friss, teljes bizonyítékhoz használja a **Teljes újraellenőrzés** gombot.
+  - A program ügyenként rákérdez az **Ügy és források** lapon, hogy a fenti gyors módot vagy a **szigorú módot** választja: ez minden levél megnyitása előtt a teljes forrás SHA-256-ját újraszámolja (exportnál forrásonként egyszer). A szigorú mód minden megnyitott és exportált levélhez friss, teljes ellenőrzést ad, de nagy PST/OST esetén egy-egy megnyitás percekig tarthat; a lap az ügy legnagyobb forrására becslést is mutat. Döntésig a gyors mód érvényes.
+  - Minden forrás sorában látszik az „Utolsó teljes ellenőrzés: <dátum, idő>”, és minden EML ZIP `MANIFEST.txt` levelenként rögzíti, hogy az exportot teljes hash vagy csak aláírás-ellenőrzés előzte-e meg, és mikor volt a forrás utolsó teljes ellenőrzése.
 - Az index lokátorokat, metaadatokat és kereshető tartalmat tárol, nem bontja ki a teljes postafiókot. MBOX/EML exportnál a program megőrzi a forrás levélbájtjait (az MBOX envelope sor nélkül); PST/OST esetén a rendelkezésre álló fejlécekből, MAPI-adatokból, törzsből és mellékletekből rekonstruált EML készül.
 - A jegyzékben szereplő hash a ZIP-be írt EML pontos bájtjain készül. A PST/OST nem tartalmaz egyetlen eredeti RFC 5322 levélfolyamot, ezért az abból készült EML rekonstrukció, nem bájtpontos eredeti. Minden ZIP tartalmaz egy `SHA256SUMS.txt` és egy `MANIFEST.txt` fájlt; utóbbi minden bejegyzésnél jelzi, hogy eredeti forrásbájt vagy PST/OST-rekonstrukció, és megadja a forrásfájlt, annak SHA-256-ját és a levél helyét.
 - A tesztekhez és képernyőképekhez kizárólag kitalált adat használható. Valódi levelet, postafiókot, hitelesítő adatot vagy személyes adatot ne tegyen a repóba.
@@ -99,6 +103,10 @@ Minden képernyőkép kizárólag kitalált postafiókadatot és nevet tartalmaz
 Nyitóképernyő:
 
 ![Mail-Scope nyitóképernyő kitalált legutóbbi ügyekkel](./docs/screenshots/welcome.png)
+
+Az ügy forrásai az utolsó teljes ellenőrzéssel és a **Teljes újraellenőrzés** gombbal:
+
+![Mail-Scope ügyforrások ellenőrzési állapottal](./docs/screenshots/sources.png)
 
 Archívum böngésző megnyitott levéllel és forenzikus adatokkal:
 
