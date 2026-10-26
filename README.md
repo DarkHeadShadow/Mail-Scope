@@ -8,22 +8,24 @@ Mail-Scope is an offline, local-first mail archive browser and analysis tool. It
 
 ## Features
 
-- Discover and index MBOX, MBX, MBS, EML, PST, and OST sources, including supported archives inside folders.
+- Discover and index MBOX, MBX, MBS, EML, PST, and OST sources, including supported archives inside folders. The EML files of one directory (for example a Mail Extractor output folder) form a single source.
 - Read PST/OST files using the optional `libpff-python-windows` binding.
 - Search message text, subject, participants, dates, attachments, folders, sources, attachment types, and case-local labels.
 - Combine detailed-search conditions in AND/OR groups; save and reload searches.
 - Merge duplicate messages in search results while retaining source occurrences and forensic locators.
 - Assign labels to all indexed source copies of a selected message.
-- Browse conversations by people and export original EML messages with SHA-256 manifests.
+- Browse conversations by people and export EML messages with SHA-256 manifests.
 - Export detailed-search results to CSV or EML ZIP; print a bounded search report to PDF using the browser's print dialog.
-- Keep indexes, labels, saved searches, and logs inside the case's `.mailscope` directory.
+- Keep indexes, labels, saved searches, and the case log (`mailscope.log`) inside the case's `.mailscope` directory. The application log is written to `%LOCALAPPDATA%\Mail-Scope\logs\mail-scope.log`.
+- Full-text search matches word prefixes, so `szerződés` also finds `szerződést`; use quotes for an exact phrase and `AND`, `OR`, `NOT` as operators.
 
 ## Privacy and source integrity
 
 - Mail-Scope does not upload data or use external services, CDNs, or network resources.
 - The local server binds to `127.0.0.1` only.
-- Source archives are opened read-only. Their SHA-256 is checked before a message is read or exported; changed sources are refused.
-- Indexing stores locators and searchable metadata rather than extracting complete mailboxes to disk. Original EML is written only when explicitly exported.
+- Source archives are opened read-only. Their SHA-256 is computed at discovery and again after indexing. Before a message is read or exported, the source's file signature (size, modification time, file identity) is compared with the one recorded at the last full hash; if it differs, the source is hashed again and refused when the hash changed.
+- Indexing stores locators and searchable metadata rather than extracting complete mailboxes to disk. MBOX/EML exports preserve the source message bytes (excluding the MBOX envelope line); PST/OST exports reconstruct an EML from available headers, MAPI properties, body, and attachment data.
+- Each manifest hash is calculated over the exact EML bytes written into the ZIP. PST/OST files do not contain a single original RFC 5322 message byte stream, so their EML is a reconstruction, not a byte-for-byte original. Every ZIP contains `SHA256SUMS.txt` and a `MANIFEST.txt` that marks each entry as original source bytes or a PST/OST reconstruction, with its source file, source SHA-256, and location.
 - Use only fictional data in tests and screenshots. Never add real mail, mailbox files, credentials, or personal data to this repository.
 
 ## Requirements
@@ -70,13 +72,15 @@ The executable opens the local UI in the default browser automatically and runs 
 2. Enter a source file or folder and review the discovered sources.
 3. Start indexing and wait for completion.
 4. Browse the archive, create people and aliases for conversation analysis, or use detailed search.
-5. Export only the results you need. CSV exports are limited to 10,000 results, EML ZIP exports to 500 messages and 256 MiB of original message data, and printable PDF reports to 2,000 results.
+5. Export only the results you need. CSV exports are limited to 10,000 results, EML ZIP exports to 500 messages and 256 MiB of exported message data, and printable PDF reports to 2,000 results.
 
 Detailed search supports subject, full-text, sender, recipient, inclusive date boundaries, attachment presence, source path, folder, attachment media type, and label conditions. Conditions may be grouped with AND/OR; groups can also be combined with AND/OR.
 
 ## Known limitations
 
-- PST/OST parsing depends on the optional native `pypff` binding and its libpff capabilities. Damaged or unsupported Outlook items may not be readable.
+- PST/OST parsing depends on the optional native `pypff` binding and its libpff capabilities. Damaged or unsupported Outlook items are indexed as failed entries; a failing source is recorded and the remaining sources are still indexed.
+- Exchange (`/O=…/CN=…`) addresses are converted to SMTP only when the mailbox itself contains the pair (for example in a recipient table); otherwise the Exchange address is kept.
+- Messages without reply headers are joined to an existing thread by subject only if they carry a reply/forward prefix, share a participant, and are within 60 days.
 - Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source.
 - A PDF is produced through the browser's print dialog, not by a bundled PDF library.
 - Search and export limits are enforced to keep local responses bounded.

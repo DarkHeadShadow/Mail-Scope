@@ -8,22 +8,24 @@ A Mail-Scope offline, helyben futó levélnéző és -elemző program. Közvetle
 
 ## Funkciók
 
-- MBOX, MBX, MBS, EML, PST és OST források felismerése és indexelése, támogatott fájlok rekurzív megtalálásával.
+- MBOX, MBX, MBS, EML, PST és OST források felismerése és indexelése, támogatott fájlok rekurzív megtalálásával. Egy mappa EML fájljai (például egy Mail Extractor kimeneti mappa) egyetlen forrást alkotnak.
 - PST/OST olvasása az opcionális `libpff-python-windows` kötésen keresztül.
 - Keresés levéltörzsben, tárgyban, résztvevők között, dátum, melléklet, mappa, forrás, melléklettípus és ügybeli címke szerint.
 - Részletes feltételépítő ÉS/VAGY csoportokkal, menthető és újra betölthető keresésekkel.
 - Duplikált levelek összevonása a találatokban, miközben megmaradnak a forráspéldányok és forenzikus lokátorok.
 - Címke hozzárendelése a kijelölt levél összes indexelt forráspéldányához.
-- Személyalapú beszélgetésnézet és eredeti EML-export SHA-256 jegyzékkel.
+- Személyalapú beszélgetésnézet és EML-export SHA-256 jegyzékkel.
 - Részletes keresési találatok exportja CSV-be vagy EML ZIP-be; korlátozott keresési jelentés nyomtatása/PDF-be mentése a böngészőből.
-- Az index, címkék, mentett keresések és naplók az ügy `.mailscope` mappájában maradnak.
+- Az index, a címkék, a mentett keresések és az ügynapló (`mailscope.log`) az ügy `.mailscope` mappájában maradnak. Az alkalmazásnapló helye: `%LOCALAPPDATA%\Mail-Scope\logs\mail-scope.log`.
+- A teljes szöveges keresés szókezdetre illeszt, így a `szerződés` a `szerződést` alakot is megtalálja; pontos kifejezéshez idézőjel, operátorként `AND`, `OR`, `NOT` használható.
 
 ## Adatvédelem és forrásintegritás
 
 - A program nem tölt fel adatot, nem használ külső szolgáltatást, CDN-t vagy internetes erőforrást.
 - A helyi szerver kizárólag a `127.0.0.1` címen figyel.
-- A forrás-postafiókok csak olvashatók. A levél megnyitása és exportja előtt SHA-256-ellenőrzés történik; megváltozott forrásból a program megtagadja az olvasást.
-- Az index lokátorokat, metaadatokat és kereshető tartalmat tárol, nem bontja ki a teljes postafiókot. Eredeti EML csak kifejezett exportkérésre készül.
+- A forrás-postafiókok csak olvashatók. A SHA-256 a felismeréskor és az indexelés után készül el. Levél megnyitása és exportja előtt a program a forrás fájlazonosítóját (méret, módosítási idő, fájlazonosító) összeveti az utolsó teljes hash-eléskor rögzítettel; eltérés esetén újra hash-el, és ha a hash megváltozott, megtagadja az olvasást.
+- Az index lokátorokat, metaadatokat és kereshető tartalmat tárol, nem bontja ki a teljes postafiókot. MBOX/EML exportnál a program megőrzi a forrás levélbájtjait (az MBOX envelope sor nélkül); PST/OST esetén a rendelkezésre álló fejlécekből, MAPI-adatokból, törzsből és mellékletekből rekonstruált EML készül.
+- A jegyzékben szereplő hash a ZIP-be írt EML pontos bájtjain készül. A PST/OST nem tartalmaz egyetlen eredeti RFC 5322 levélfolyamot, ezért az abból készült EML rekonstrukció, nem bájtpontos eredeti. Minden ZIP tartalmaz egy `SHA256SUMS.txt` és egy `MANIFEST.txt` fájlt; utóbbi minden bejegyzésnél jelzi, hogy eredeti forrásbájt vagy PST/OST-rekonstrukció, és megadja a forrásfájlt, annak SHA-256-ját és a levél helyét.
 - A tesztekhez és képernyőképekhez kizárólag kitalált adat használható. Valódi levelet, postafiókot, hitelesítő adatot vagy személyes adatot ne tegyen a repóba.
 
 ## Követelmények
@@ -70,13 +72,15 @@ Az `.exe` indításakor a program automatikusan megnyitja a helyi felületet az 
 2. Adjon meg forrásfájlt vagy mappát, és ellenőrizze a felismert forrásokat.
 3. Indítsa el az indexelést, majd várja meg a befejezését.
 4. Böngéssze az archívumot, hozzon létre személyeket és aliasokat a beszélgetésekhez, vagy használja a részletes keresést.
-5. Csak a szükséges eredményeket exportálja. A CSV legfeljebb 10 000, az EML ZIP legfeljebb 500 levelet és 256 MiB eredeti levéladatot, a nyomtatható PDF-jelentés legfeljebb 2000 találatot tartalmazhat.
+5. Csak a szükséges eredményeket exportálja. A CSV legfeljebb 10 000, az EML ZIP legfeljebb 500 levelet és 256 MiB exportált levéladatot, a nyomtatható PDF-jelentés legfeljebb 2000 találatot tartalmazhat.
 
 A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
 
 ## Ismert korlátozások
 
-- A PST/OST olvasás az opcionális natív `pypff` kötéstől és a libpff képességeitől függ. Sérült vagy nem támogatott Outlook-elemek beolvasása sikertelen lehet.
+- A PST/OST olvasás az opcionális natív `pypff` kötéstől és a libpff képességeitől függ. Sérült vagy nem támogatott Outlook-elemek „hibás” bejegyzésként kerülnek az indexbe; egy sikertelen forrás naplózódik, a többi forrás indexelése folytatódik.
+- Az Exchange (`/O=…/CN=…`) címek csak akkor alakulnak SMTP-címmé, ha a postafiók maga tartalmazza a párosítást (például egy címzetttáblában); egyébként az Exchange-cím marad.
+- Válaszfejléc nélküli levél csak akkor kerül tárgy alapján egy meglévő szálba, ha válasz/továbbítás előtagja van, van közös résztvevője, és 60 napon belül van.
 - A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.

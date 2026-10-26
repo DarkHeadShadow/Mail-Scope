@@ -59,6 +59,7 @@ class MessageMetadata:
     deleted: bool = False
     item_type: str = "mail"
     error: str | None = None
+    address_aliases: tuple[tuple[str, str], ...] = ()
 
     @property
     def recipient_addresses(self) -> tuple[str, ...]:
@@ -82,4 +83,8 @@ class SourceReader(Protocol):
 
     def open_message(self, locator: MessageLocator) -> EmailMessage: ...
 
+    def open_message_bytes(self, locator: MessageLocator) -> bytes: ...
+
     def open_attachment(self, locator: MessageLocator, index: int) -> Attachment: ...
+
+    def close(self) -> None: ...

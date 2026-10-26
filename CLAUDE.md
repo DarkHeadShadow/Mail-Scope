@@ -116,7 +116,9 @@ Forrás lehet:
    CC/BCC- és dátumkapcsolók, szál- és teljes szöveges keresés, személyszínek,
    havi aktivitás és napokra bontott idővonal csendjelzéssel. A nyomtatási nézetből
    PDF menthető, az EML ZIP SHA-256 jegyzéket tartalmaz; export előtt az eredeti
-   források hash-e ellenőrzött.
+   források hash-e ellenőrzött. MBOX/EML esetén a forrás levélbájtjai kerülnek az
+   exportba (az MBOX envelope sor nélkül), PST/OST esetén az elérhető adatokból
+   rekonstruált EML, mellékletekkel.
 6. [x] Részletes keresés, címkék, mentett keresések: legfeljebb tíz, ÉS/VAGY
    operátorral összekapcsolt feltételcsoport és összesen húsz mező; teljes szöveg,
    tárgy, feladó, címzett, dátum, melléklet, forrás, mappa, melléklettípus és címke
@@ -125,7 +127,8 @@ Forrás lehet:
    mentés, betöltés és törlés. A címkék és keresések
    kizárólag az ügy SQLite-adatbázisában tárolódnak.
 7. [x] Exportok és csomagolás: részletes keresési találatok CSV-be (Excel-kompatibilis,
-   képletbiztonságos UTF-8 BOM-mal) és eredeti levelek EML ZIP-be SHA-256 jegyzékkel;
+   képletbiztonságos UTF-8 BOM-mal) és MBOX/EML forrásbájtokból vagy PST/OST
+   rekonstrukcióból létrejövő EML ZIP-be, SHA-256 jegyzékkel;
    keresési jelentés nyomtatása/PDF-be mentése a böngészőből. A teljes EML-export
    forrás-hash ellenőrzéssel működik, méret- és találati korlátokkal. Elkészült a
    Python 3.13 x64 / Windows onedir PyInstaller build, a fejlesztői és build

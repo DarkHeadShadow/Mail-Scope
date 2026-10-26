@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 from indexer import IndexDatabase, IndexingService, PersonDirectory
 from server import ApiError, MailScopeApplication, create_server
 from server.__main__ import main as run_server_main
-from sources.discover import discover_sources, sha256_file
+from sources.discover import discover_sources, hash_source
 
 
 def _fixture_mail(
@@ -94,10 +94,12 @@ class ServerTests(unittest.TestCase):
             offset=0,
         )
         self.assertEqual(len(archive_rows), 1)
-        with patch("server.app.sha256_file", wraps=sha256_file) as hash_source:
+        # The full hash recorded after indexing stays valid while the file
+        # signature is unchanged, so opening does not re-hash the source.
+        with patch("server.app.hash_source", wraps=hash_source) as hashing:
             opened = self.application.open_message(int(archive_rows[0]["message_id"]))
             self.application.open_message(int(archive_rows[0]["message_id"]))
-            self.assertEqual(hash_source.call_count, 1)
+            self.assertEqual(hashing.call_count, 0)
             self.assertEqual(
                 opened["headers"]["subject"],
                 "Kitalált levél a helyi felület tesztjéhez",
@@ -111,7 +113,7 @@ class ServerTests(unittest.TestCase):
             with self.assertRaises(ApiError) as raised:
                 self.application.open_message(int(archive_rows[0]["message_id"]))
             self.assertEqual(raised.exception.status, 409)
-            self.assertEqual(hash_source.call_count, 2)
+            self.assertEqual(hashing.call_count, 1)
         self.assertTrue((self.case_directory / ".mailscope" / "index.sqlite3").is_file())
 
     def test_refuses_to_open_a_source_changed_after_indexing(self) -> None:
@@ -166,6 +168,7 @@ class ServerTests(unittest.TestCase):
         with (
             patch("sys.argv", ["mailscope", "--port", "0"]),
             patch("server.__main__.create_server", return_value=http_server),
+            patch("server.__main__.configure_logging", return_value=None),
             patch("server.__main__.webbrowser.open", return_value=True) as open_browser,
         ):
             run_server_main()
@@ -362,8 +365,9 @@ class ServerTests(unittest.TestCase):
 
         with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
             names = archive.namelist()
-            self.assertEqual(len(names), 3)
+            self.assertEqual(len(names), 4)
             self.assertIn("SHA256SUMS.txt", names)
+            self.assertIn("MANIFEST.txt", names)
             eml_names = [name for name in names if name.endswith(".eml")]
             self.assertEqual(len(eml_names), 2)
             self.assertTrue(all("/" not in name and "\\" not in name for name in eml_names))
@@ -483,7 +487,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(export_response.status, 200)
         self.assertIn(".eml.zip", export_response.getheader("Content-Disposition"))
         with zipfile.ZipFile(BytesIO(export_response.read())) as export:
-            self.assertEqual(export.namelist(), ["SHA256SUMS.txt"])
+            self.assertEqual(export.namelist(), ["SHA256SUMS.txt", "MANIFEST.txt"])
 
     def test_shutdown_requires_confirmation_when_indexing_is_active(self) -> None:
         """Require explicit confirmation before cancelling an active index job."""
@@ -670,11 +674,18 @@ class ServerTests(unittest.TestCase):
     def test_detailed_search_exports_csv_and_verified_eml_zip(self) -> None:
         """Export detailed-search metadata and originals without changing sources."""
         self.application.select_case(str(self.case_directory))
+        raw_eml = (
+            b"From: antal@pelda.hu\r\n"
+            b"To: anna@pelda.hu\r\n"
+            b"Subject: =SUM(1,1)\r\n"
+            b"Date: Sat, 1 Jan 2022 00:00:00 +0000\r\n"
+            b"Message-ID: <csv-formula@example.test>\r\n"
+            b"X-Folded: original\r\n\tcontinued\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"Raw body with trailing spaces.  \r\n"
+        )
         self.source_path.write_bytes(
-            _fixture_mail(
-                subject="=SUM(1,1)",
-                message_id="<csv-formula@example.test>",
-            )
+            b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + raw_eml
         )
         source = self.application.discover(str(self.source_path))[0]
         self.application.start_index([source["path"]])
@@ -704,13 +715,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(zip_name, "Mail-Scope-search.eml.zip")
         with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
             names = archive.namelist()
-            self.assertEqual(len(names), 2)
+            self.assertEqual(len(names), 3)
+            self.assertIn("eredeti forrásbájtok", archive.read("MANIFEST.txt").decode("utf-8"))
             eml_name = next(name for name in names if name.endswith(".eml"))
-            raw_message = archive.read(eml_name)
+            exported_message = archive.read(eml_name)
             manifest = archive.read("SHA256SUMS.txt").decode("utf-8")
-            self.assertIn(hashlib.sha256(raw_message).hexdigest(), manifest)
+            self.assertEqual(exported_message, raw_eml)
+            self.assertIn(hashlib.sha256(exported_message).hexdigest(), manifest)
             self.assertIn(eml_name, manifest)
-            self.assertIn(b"Message-ID: <csv-formula@example.test>", raw_message)
+            self.assertIn(b"Message-ID: <csv-formula@example.test>", exported_message)
 
         self.assertEqual(
             hashlib.sha256(self.source_path.read_bytes()).hexdigest(),

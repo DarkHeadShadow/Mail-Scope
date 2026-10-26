@@ -76,9 +76,11 @@ class DiscoverTests(unittest.TestCase):
                     ("mbox", "Inbox"),
                     ("mbox", "Inbox"),
                     ("mbox", "Inbox/Munka"),
-                    ("eml", root.name),
+                    ("emldir", root.name),
                 ],
             )
+            self.assertEqual(sources[-1].path, root)
+            self.assertEqual(sources[-1].size, eml.stat().st_size)
 
 
 if __name__ == "__main__":

@@ -568,7 +568,16 @@ function renderStatus(status) {
     } else if (job.error) {
       progress.textContent = `Az indexelés hibával leállt: ${job.error}`;
     } else if (job.summary) {
-      progress.textContent = `Indexelés ${job.summary.status}: ${job.summary.messages_indexed} új levél, ${job.summary.messages_skipped} kihagyva.`;
+      const statusNames = {
+        completed: "befejeződött",
+        completed_with_errors: "befejeződött, de volt hibás forrás",
+        cancelled: "megszakítva",
+        source_changed: "leállt: egy forrás megváltozott",
+      };
+      const failed = job.summary.sources_failed
+        ? ` ${job.summary.sources_failed} forrás hibás, részletek a forráslistában és a naplóban${status.log && status.log.case ? ` (${status.log.case})` : ""}.`
+        : "";
+      progress.textContent = `Indexelés ${statusNames[job.summary.status] || job.summary.status}: ${job.summary.messages_indexed} új levél, ${job.summary.messages_skipped} kihagyva.${failed}`;
     }
   }
   if (job && job.running && !state.pollTimer) {

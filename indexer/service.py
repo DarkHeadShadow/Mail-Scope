@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from sources.discover import DiscoveredSource, sha256_file
+from sources.discover import DiscoveredSource, hash_source, source_signature
 from sources.models import MessageMetadata, SourceReader
 from sources.reader_factory import open_source
 
@@ -18,6 +18,7 @@ from .database import IndexDatabase
 
 
 logger = logging.getLogger(__name__)
+COMMIT_BATCH_SIZE = 500
 _REPLY_PREFIX = re.compile(r"^\s*(?:(?:re|fw|fwd|vs)\s*:\s*)+", re.IGNORECASE)
 _MESSAGE_ID = re.compile(r"<([^<>]+)>")
 
@@ -48,6 +49,7 @@ class IndexSummary:
     messages_scanned: int
     messages_indexed: int
     messages_skipped: int
+    sources_failed: int = 0
 
 
 ProgressCallback = Callable[[IndexProgress], None]
@@ -76,13 +78,14 @@ class IndexingService:
         progress_callback: ProgressCallback | None = None,
         reader_factory: Callable[[DiscoveredSource], SourceReader] = open_source,
     ) -> IndexSummary:
-        """Index sources serially, committing each message to support resume."""
+        """Index sources serially, committing in batches to support resume."""
         source_list = list(sources)
         cancellation = cancel_event or threading.Event()
         source_total = len(source_list)
         sources_completed = 0
         sources_skipped = 0
         sources_changed = 0
+        sources_failed = 0
         messages_scanned = 0
         messages_indexed = 0
         messages_skipped = 0
@@ -118,104 +121,110 @@ class IndexingService:
                 break
 
             source_path = str(source.path)
-            logger.info("Hashing source before indexing: %s", source_path)
-            sha256_before = sha256_file(source.path)
-            logger.info(
-                "Source SHA-256 before indexing: %s %s",
-                source_path,
-                sha256_before,
-            )
-            source_id, already_complete = self.database.register_source(
-                path=source_path,
-                kind=source.kind,
-                size=source.size,
-                discovered_sha256=source.sha256,
-                sha256_before=sha256_before,
-            )
-            if sha256_before != source.sha256:
-                message = "Source changed after discovery and was not indexed."
-                logger.error(
-                    "%s expected=%s actual=%s",
-                    message,
-                    source.sha256,
-                    sha256_before,
-                )
-                self.database.mark_source(
-                    source_id,
-                    "source_changed",
-                    sha256_after=sha256_before,
-                    error=message,
-                )
-                sources_changed += 1
-                final_status = "source_changed"
-                report(final_status, source_number, source_path, error=message)
-                continue
-            if already_complete:
-                sources_skipped += 1
-                report("skipped", source_number, source_path)
-                continue
-
+            source_id: int | None = None
+            sha256_before: str | None = None
             try:
-                reader = reader_factory(source)
-                folders = {
-                    folder.path: self.database.add_folder(
-                        source_id, folder.path, folder.name
+                sha256_before = self._hash_before(source)
+                source_id, already_complete = self.database.register_source(
+                    path=source_path,
+                    kind=source.kind,
+                    size=source.size,
+                    discovered_sha256=source.sha256,
+                    sha256_before=sha256_before,
+                )
+                if sha256_before != source.sha256:
+                    message = "Source changed after discovery and was not indexed."
+                    logger.error(
+                        "%s expected=%s actual=%s",
+                        message,
+                        source.sha256,
+                        sha256_before,
                     )
-                    for folder in reader.iter_folders()
-                }
-                last_locator = self.database.last_locator(source_id)
-                report("indexing", source_number, source_path)
+                    self.database.mark_source(
+                        source_id,
+                        "source_changed",
+                        sha256_after=sha256_before,
+                        error=message,
+                    )
+                    sources_changed += 1
+                    final_status = "source_changed"
+                    report(final_status, source_number, source_path, error=message)
+                    continue
+                if already_complete:
+                    sources_skipped += 1
+                    report("skipped", source_number, source_path)
+                    continue
 
-                for metadata in reader.iter_messages(after_locator=last_locator):
-                    if cancellation.is_set():
-                        break
+                reader = reader_factory(source)
+                try:
+                    with self.database.connection() as connection:
+                        folders = {
+                            folder.path: self.database.add_folder(
+                                source_id, folder.path, folder.name, connection=connection
+                            )
+                            for folder in reader.iter_folders()
+                        }
+                        connection.commit()
+                        last_locator = self.database.last_locator(source_id)
+                        report("indexing", source_number, source_path)
 
-                    messages_scanned += 1
-                    folder_id = folders.get(metadata.folder)
-                    if folder_id is None:
-                        folder_id = self.database.add_folder(
-                            source_id, metadata.folder, metadata.folder.rsplit("/", 1)[-1]
-                        )
-                        folders[metadata.folder] = folder_id
+                        pending = 0
+                        for metadata in reader.iter_messages(after_locator=last_locator):
+                            if cancellation.is_set():
+                                break
 
-                    if self.database.has_occurrence(
-                        source_id, folder_id, metadata.locator
-                    ):
-                        messages_skipped += 1
-                    else:
-                        dedup_key, thread_key, normalized_subject, content_hash = (
-                            _message_keys(source_id, metadata)
-                        )
-                        thread_key = self.database.resolve_thread_key(
-                            thread_key,
-                            normalized_subject,
-                            tuple(
-                                _parent_ids(
-                                    metadata.references,
-                                    metadata.in_reply_to,
-                                    metadata.message_id,
+                            messages_scanned += 1
+                            folder_id = folders.get(metadata.folder)
+                            if folder_id is None:
+                                folder_id = self.database.add_folder(
+                                    source_id,
+                                    metadata.folder,
+                                    metadata.folder.rsplit("/", 1)[-1],
+                                    connection=connection,
                                 )
-                            ),
-                        )
-                        inserted = self.database.store_message(
-                            source_id=source_id,
-                            folder_id=folder_id,
-                            metadata=metadata,
-                            dedup_key=dedup_key,
-                            thread_key=thread_key,
-                            normalized_subject=normalized_subject,
-                            content_hash=content_hash,
-                            message_hash=content_hash,
-                        )
-                        if inserted:
-                            messages_indexed += 1
-                        else:
-                            messages_skipped += 1
+                                folders[metadata.folder] = folder_id
 
-                    report("indexing", source_number, source_path, metadata.subject)
+                            dedup_key, thread_key, normalized_subject, content_hash = (
+                                _message_keys(source_id, metadata)
+                            )
+                            inserted = self.database.store_message(
+                                source_id=source_id,
+                                folder_id=folder_id,
+                                metadata=metadata,
+                                dedup_key=dedup_key,
+                                thread_key=thread_key,
+                                normalized_subject=normalized_subject,
+                                content_hash=content_hash,
+                                message_hash=content_hash,
+                                parent_ids=tuple(
+                                    _parent_ids(
+                                        metadata.references,
+                                        metadata.in_reply_to,
+                                        metadata.message_id,
+                                    )
+                                ),
+                                subject_fallback=_is_reply_subject(metadata.subject),
+                                connection=connection,
+                            )
+                            if inserted:
+                                messages_indexed += 1
+                            else:
+                                messages_skipped += 1
+                            pending += 1
+                            # Commit in batches: a resumed job repeats at most
+                            # one batch, which store_message skips as duplicates.
+                            if pending >= COMMIT_BATCH_SIZE:
+                                connection.commit()
+                                pending = 0
+
+                            report("indexing", source_number, source_path, metadata.subject)
+                finally:
+                    reader.close()
+                self.database.resolve_address_aliases()
+                self.database.split_unanchored_threads()
 
                 logger.info("Hashing source after indexing: %s", source_path)
-                sha256_after = sha256_file(source.path)
+                sha256_after, signature_after = hash_source(source.path, source.kind)
                 logger.info(
                     "Source SHA-256 after indexing: %s %s",
                     source_path,
@@ -248,51 +257,33 @@ class IndexingService:
                 if cancellation.is_set():
                     final_status = "cancelled"
                     self.database.mark_source(
-                        source_id, "cancelled", sha256_after=sha256_after
+                        source_id,
+                        "cancelled",
+                        sha256_after=sha256_after,
+                        verified_signature=signature_after,
                     )
                     report(final_status, source_number, source_path)
                     continue
 
                 self.database.mark_source(
-                    source_id, "completed", sha256_after=sha256_after
+                    source_id,
+                    "completed",
+                    sha256_after=sha256_after,
+                    verified_signature=signature_after,
                 )
                 sources_completed += 1
                 report("completed", source_number, source_path)
             except Exception as error:
-                try:
-                    sha256_after = sha256_file(source.path)
-                except OSError as hash_error:
-                    self.database.mark_source(
-                        source_id,
-                        "failed",
-                        error=(
-                            f"{error}; unable to verify source after indexing: "
-                            f"{hash_error}"
-                        ),
-                    )
-                else:
-                    logger.info(
-                        "Source SHA-256 after indexing failure: %s %s",
-                        source_path,
-                        sha256_after,
-                    )
-                    if sha256_after != sha256_before:
-                        self.database.mark_source(
-                            source_id,
-                            "source_changed",
-                            sha256_after=sha256_after,
-                            error="Source changed while indexing failed.",
-                        )
-                    else:
-                        self.database.mark_source(
-                            source_id,
-                            "failed",
-                            sha256_after=sha256_after,
-                            error=str(error),
-                        )
+                # One unreadable source must not prevent the remaining
+                # sources from being indexed; the failure is recorded.
                 logger.exception("Indexing source failed: %s", source_path)
-                report("failed", source_number, source_path, error=str(error))
-                raise
+                sources_failed += 1
+                if final_status == "completed":
+                    final_status = "completed_with_errors"
+                error_text = f"{type(error).__name__}: {error}"
+                if source_id is not None:
+                    self._mark_failed(source, source_id, sha256_before, error_text)
+                report("failed", source_number, source_path, error=error_text)
 
         if cancellation.is_set() and final_status == "completed":
             final_status = "cancelled"
@@ -304,7 +295,60 @@ class IndexingService:
             messages_scanned=messages_scanned,
             messages_indexed=messages_indexed,
             messages_skipped=messages_skipped,
+            sources_failed=sources_failed,
         )
+
+    def _hash_before(self, source: DiscoveredSource) -> str:
+        """Hash a source, reusing the discovery hash while its file signature is unchanged."""
+        source_path = str(source.path)
+        if source.signature is not None:
+            try:
+                current = source_signature(source.path, source.kind)
+            except OSError:
+                current = None
+            if current == source.signature:
+                logger.info(
+                    "Source unchanged since discovery hashing: %s sha256=%s",
+                    source_path,
+                    source.sha256,
+                )
+                return source.sha256
+        logger.info("Hashing source before indexing: %s", source_path)
+        sha256_before, _ = hash_source(source.path, source.kind)
+        logger.info("Source SHA-256 before indexing: %s %s", source_path, sha256_before)
+        return sha256_before
+
+    def _mark_failed(
+        self,
+        source: DiscoveredSource,
+        source_id: int,
+        sha256_before: str | None,
+        error_text: str,
+    ) -> None:
+        """Record a failed source after checking whether it changed meanwhile."""
+        try:
+            sha256_after, _ = hash_source(source.path, source.kind)
+        except OSError as hash_error:
+            self.database.mark_source(
+                source_id,
+                "failed",
+                error=f"{error_text}; unable to verify source after indexing: {hash_error}",
+            )
+            return
+        logger.info(
+            "Source SHA-256 after indexing failure: %s %s", source.path, sha256_after
+        )
+        if sha256_before is not None and sha256_after != sha256_before:
+            self.database.mark_source(
+                source_id,
+                "source_changed",
+                sha256_after=sha256_after,
+                error="Source changed while indexing failed.",
+            )
+        else:
+            self.database.mark_source(
+                source_id, "failed", sha256_after=sha256_after, error=error_text
+            )
 
 
 class IndexingJob:
@@ -420,11 +464,16 @@ def _message_keys(
         thread_key = f"mid:{parent_ids[0]}"
     elif message_id:
         thread_key = f"mid:{message_id}"
-    elif normalized_subject:
-        thread_key = f"subject:{normalized_subject}"
     else:
+        # Subject-only matches are resolved against nearby, shared-participant
+        # threads in the database; never by subject alone.
         thread_key = f"message:{dedup_key}"
     return dedup_key, thread_key, normalized_subject, content_hash
+
+
+def _is_reply_subject(subject: str) -> bool:
+    """Report whether a subject carries a Re:/Fw:/VS: style prefix."""
+    return _REPLY_PREFIX.match(subject or "") is not None
 
 
 def _parent_ids(

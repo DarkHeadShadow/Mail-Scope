@@ -4,8 +4,9 @@ __author__ = "Bálint Szabolcs"
 
 import calendar
 import json
+import re
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -13,6 +14,11 @@ from typing import Any, Generator
 
 from sources.models import MessageLocator, MessageMetadata
 
+
+SUBJECT_THREAD_WINDOW_SECONDS = 60 * 86400
+_FTS_TOKEN = re.compile(r'"([^"]*)"?|(\()|(\))|([^\s"()]+)')
+_FTS_WORD = re.compile(r"\w+", re.UNICODE)
+_FTS_OPERATORS = {"AND", "OR", "NOT"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -123,9 +129,16 @@ CREATE TABLE IF NOT EXISTS saved_searches (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS address_aliases (
+    legacy_address TEXT PRIMARY KEY,
+    smtp_address TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_occurrences_message ON occurrences(message_id);
 CREATE INDEX IF NOT EXISTS idx_participants_address ON participants(address);
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_key);
+CREATE INDEX IF NOT EXISTS idx_messages_normalized_subject
+    ON messages(normalized_subject);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     subject,
@@ -171,6 +184,7 @@ class IndexDatabase:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA synchronous = NORMAL")
         connection.create_function(
             "casefold", 1, _sqlite_casefold, deterministic=True
         )
@@ -187,6 +201,7 @@ class IndexDatabase:
         """Create tables, indexes, triggers, and the required FTS5 virtual table."""
         try:
             with self.connection() as connection:
+                connection.execute("PRAGMA journal_mode = WAL")
                 connection.executescript(SCHEMA)
                 connection.execute(
                     "INSERT OR IGNORE INTO app_metadata(key, value) VALUES (?, ?)",
@@ -244,12 +259,27 @@ class IndexDatabase:
                     ON messages(normalized_message_id)
                     """
                 )
+                source_columns = {
+                    row["name"]
+                    for row in connection.execute("PRAGMA table_info(sources)")
+                }
+                if "verified_signature" not in source_columns:
+                    connection.execute(
+                        "ALTER TABLE sources ADD COLUMN verified_signature TEXT"
+                    )
+                schema_version = connection.execute(
+                    "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+                ).fetchone()
+                if schema_version is not None and int(schema_version["value"]) < 6:
+                    # Message bodies now live only in the FTS table, which
+                    # already holds a copy of every previously stored body.
+                    connection.execute("UPDATE messages SET body = '' WHERE body != ''")
                 connection.execute(
                     """
                     INSERT INTO app_metadata(key, value) VALUES (?, ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
-                    ("schema_version", "5"),
+                    ("schema_version", "6"),
                 )
                 connection.execute(
                     """
@@ -334,6 +364,7 @@ class IndexDatabase:
         *,
         sha256_after: str | None = None,
         error: str | None = None,
+        verified_signature: tuple[int, ...] | None = None,
     ) -> None:
         """Persist the indexing result and final source integrity hash."""
         with self.connection() as connection:
@@ -341,31 +372,124 @@ class IndexDatabase:
                 """
                 UPDATE sources
                 SET status = ?, sha256_after = ?, last_error = ?,
+                    verified_signature = ?,
                     indexed_count = (
                         SELECT count(*) FROM occurrences WHERE source_id = ?
                     ),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (status, sha256_after, error, source_id, source_id),
+                (
+                    status,
+                    sha256_after,
+                    error,
+                    None if verified_signature is None else json.dumps(verified_signature),
+                    source_id,
+                    source_id,
+                ),
             )
 
-    def add_folder(self, source_id: int, path: str, name: str) -> int:
-        """Insert or retrieve a source folder by its reader-relative path."""
+    def verified_source(self, path: str) -> tuple[str, tuple[int, ...]] | None:
+        """Return the last full hash of a source and the file signature it matched."""
         with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT sha256_after, verified_signature FROM sources
+                WHERE path = ? AND sha256_after IS NOT NULL
+                  AND verified_signature IS NOT NULL
+                """,
+                (str(Path(path).resolve()),),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["sha256_after"]), tuple(json.loads(row["verified_signature"]))
+
+    def split_unanchored_threads(self) -> int:
+        """Split threads whose shared parent is absent and whose subjects disagree.
+
+        Some notification systems put one fixed ID into In-Reply-To of every
+        message. When that parent is not in the archive and most messages have
+        different subjects, the reply headers do not describe a conversation,
+        so the messages are regrouped by normalized subject.
+        """
+        with self.connection() as connection:
+            thread_keys = [
+                str(row["thread_key"])
+                for row in connection.execute(
+                    """
+                    SELECT thread_key FROM messages
+                    WHERE thread_key LIKE 'mid:%'
+                    GROUP BY thread_key
+                    HAVING count(DISTINCT normalized_subject) >= 3
+                       AND count(DISTINCT normalized_subject) * 2 > count(*)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM messages AS root
+                           WHERE root.normalized_message_id = substr(messages.thread_key, 5)
+                       )
+                    """
+                )
+            ]
+            for thread_key in thread_keys:
+                connection.execute(
+                    """
+                    UPDATE messages
+                    SET thread_key = thread_key || '|' || normalized_subject
+                    WHERE thread_key = ?
+                    """,
+                    (thread_key,),
+                )
+        return len(thread_keys)
+
+    def resolve_address_aliases(self) -> int:
+        """Rewrite Exchange legacy addresses to SMTP wherever a mapping is known."""
+        with self.connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE OR IGNORE participants
+                SET address = (
+                    SELECT smtp_address FROM address_aliases
+                    WHERE legacy_address = participants.address
+                )
+                WHERE address IN (SELECT legacy_address FROM address_aliases)
+                """
+            )
+            updated = cursor.rowcount
+            # Rows left behind already had the SMTP form for the same role.
             connection.execute(
                 """
-                INSERT INTO folders(source_id, path, name)
-                VALUES (?, ?, ?)
-                ON CONFLICT(source_id, path) DO UPDATE SET name = excluded.name
-                """,
-                (source_id, path, name),
+                DELETE FROM participants
+                WHERE address IN (SELECT legacy_address FROM address_aliases)
+                """
             )
-            row = connection.execute(
-                "SELECT id FROM folders WHERE source_id = ? AND path = ?",
-                (source_id, path),
-            ).fetchone()
-            return int(row["id"])
+        return updated
+
+    def add_folder(
+        self,
+        source_id: int,
+        path: str,
+        name: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> int:
+        """Insert or retrieve a source folder by its reader-relative path."""
+        if connection is None:
+            with self.connection() as owned_connection:
+                return self.add_folder(
+                    source_id, path, name, connection=owned_connection
+                )
+        connection.execute(
+            """
+            INSERT INTO folders(source_id, path, name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(source_id, path) DO UPDATE SET name = excluded.name
+            """,
+            (source_id, path, name),
+        )
+        row = connection.execute(
+            "SELECT id FROM folders WHERE source_id = ? AND path = ?",
+            (source_id, path),
+        ).fetchone()
+        return int(row["id"])
 
     def last_locator(self, source_id: int) -> MessageLocator | None:
         """Return the most recently committed locator for a resumable source."""
@@ -393,69 +517,79 @@ class IndexDatabase:
             item_id=row["locator_item_id"] or None,
         )
 
-    def has_occurrence(
-        self, source_id: int, folder_id: int, locator: MessageLocator
-    ) -> bool:
-        """Check whether this source message locator has already been committed."""
-        with self.connection() as connection:
-            row = connection.execute(
-                """
-                SELECT 1 FROM occurrences
-                WHERE source_id = ? AND folder_id = ? AND locator_offset = ?
-                  AND locator_folder_path = ? AND locator_item_index = ?
-                """,
-                (
-                    source_id,
-                    folder_id,
-                    locator.offset,
-                    locator.folder_path or "",
-                    -1 if locator.item_index is None else locator.item_index,
-                ),
-            ).fetchone()
-        return row is not None
-
-    def resolve_thread_key(
-        self,
+    @staticmethod
+    def _resolve_thread_key(
+        connection: sqlite3.Connection,
         proposed_key: str,
         normalized_subject: str,
         parent_ids: tuple[str, ...],
+        *,
+        subject_fallback: bool = False,
+        addresses: tuple[str, ...] = (),
+        sent_timestamp: int | None = None,
     ) -> str:
-        """Resolve known parent IDs and subject fallbacks to an existing thread."""
-        with self.connection() as connection:
-            if parent_ids:
-                existing_messages = connection.execute(
-                    """
-                    SELECT normalized_message_id, thread_key FROM messages
-                    WHERE normalized_message_id IN (
-                    """
-                    + ", ".join("?" for _ in parent_ids)
-                    + """
-                    )
-                    ORDER BY id
-                    """,
-                    tuple(parent_ids),
-                ).fetchall()
-                threads_by_parent: dict[str, str] = {}
-                for row in existing_messages:
-                    threads_by_parent.setdefault(
-                        str(row["normalized_message_id"]), str(row["thread_key"])
-                    )
-                for parent_id in parent_ids:
-                    if parent_id.casefold() in threads_by_parent:
-                        return threads_by_parent[parent_id.casefold()]
-                return proposed_key
+        """Resolve a thread using an existing transaction connection.
 
-            if normalized_subject:
-                row = connection.execute(
-                    """
-                    SELECT thread_key FROM messages
-                    WHERE normalized_subject = ?
-                    ORDER BY id LIMIT 1
-                    """,
-                    (normalized_subject,),
-                ).fetchone()
-                if row is not None:
-                    return str(row["thread_key"])
+        Without reply identifiers, only replies and forwards fall back to the
+        subject, and only into a nearby thread with a shared participant, so
+        recurring subjects such as "Számla" do not merge across years.
+        """
+        if parent_ids:
+            existing_messages = connection.execute(
+                """
+                SELECT normalized_message_id, thread_key FROM messages
+                WHERE normalized_message_id IN (
+                """
+                + ", ".join("?" for _ in parent_ids)
+                + """
+                )
+                ORDER BY id
+                """,
+                tuple(parent_ids),
+            ).fetchall()
+            threads_by_parent: dict[str, str] = {}
+            for row in existing_messages:
+                threads_by_parent.setdefault(
+                    str(row["normalized_message_id"]), str(row["thread_key"])
+                )
+            for parent_id in parent_ids:
+                if parent_id.casefold() in threads_by_parent:
+                    return threads_by_parent[parent_id.casefold()]
+            return proposed_key
+
+        if subject_fallback and normalized_subject and addresses:
+            placeholders = ", ".join("?" for _ in addresses)
+            row = connection.execute(
+                f"""
+                SELECT thread_key FROM messages
+                WHERE normalized_subject = ?
+                  AND (
+                      ? IS NULL OR sent_timestamp IS NULL
+                      OR abs(sent_timestamp - ?) <= ?
+                  )
+                  AND EXISTS (
+                      SELECT 1 FROM participants
+                      WHERE participants.message_id = messages.id
+                        AND participants.address IN ({placeholders})
+                  )
+                ORDER BY CASE
+                    WHEN ? IS NULL OR sent_timestamp IS NULL THEN 0
+                    ELSE abs(sent_timestamp - ?)
+                END, id
+                LIMIT 1
+                """,
+                (
+                    normalized_subject,
+                    sent_timestamp,
+                    sent_timestamp,
+                    SUBJECT_THREAD_WINDOW_SECONDS,
+                    *addresses,
+                    sent_timestamp,
+                    sent_timestamp,
+                ),
+            ).fetchone()
+            if row is not None:
+                return str(row["thread_key"])
         return proposed_key
 
     def store_message(
@@ -469,10 +603,82 @@ class IndexDatabase:
         normalized_subject: str,
         content_hash: str,
         message_hash: str,
+        parent_ids: tuple[str, ...] = (),
+        subject_fallback: bool = False,
+        connection: sqlite3.Connection | None = None,
     ) -> bool:
-        """Persist one message, occurrence, participants, attachments, and labels."""
+        """Persist one message, occurrence, participants, attachments, and labels.
+
+        Pass ``connection`` to batch many messages into one transaction; the
+        caller then owns the commit.
+        """
         locator = metadata.locator
-        with self.connection() as connection:
+        context = (
+            self.connection() if connection is None else nullcontext(connection)
+        )
+        with context as connection:
+            existing_occurrence = connection.execute(
+                """
+                SELECT 1 FROM occurrences
+                WHERE source_id = ? AND folder_id = ? AND locator_offset = ?
+                  AND locator_folder_path = ? AND locator_item_index = ?
+                """,
+                (
+                    source_id,
+                    folder_id,
+                    locator.offset,
+                    locator.folder_path or "",
+                    -1 if locator.item_index is None else locator.item_index,
+                ),
+            ).fetchone()
+            if existing_occurrence is not None:
+                return False
+
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO address_aliases(legacy_address, smtp_address)
+                VALUES (?, ?)
+                """,
+                [
+                    (_normalize_address(legacy), _normalize_address(smtp))
+                    for legacy, smtp in metadata.address_aliases
+                    if legacy.strip() and smtp.strip()
+                ],
+            )
+            role_addresses: list[tuple[str, str, str]] = []
+            for role, addresses in (
+                ("from", metadata.from_addresses),
+                ("to", metadata.to_addresses),
+                ("cc", metadata.cc_addresses),
+                ("bcc", metadata.bcc_addresses),
+            ):
+                for address in addresses:
+                    observed_address = _normalize_address(address)
+                    if not observed_address:
+                        continue
+                    normalized_address = observed_address
+                    if observed_address.startswith("/o="):
+                        alias = connection.execute(
+                            """
+                            SELECT smtp_address FROM address_aliases
+                            WHERE legacy_address = ?
+                            """,
+                            (observed_address,),
+                        ).fetchone()
+                        if alias is not None:
+                            normalized_address = str(alias["smtp_address"])
+                    role_addresses.append((role, observed_address, normalized_address))
+
+            message_timestamp = _parse_message_timestamp(metadata.date)
+            thread_key = self._resolve_thread_key(
+                connection,
+                thread_key,
+                normalized_subject,
+                parent_ids,
+                subject_fallback=subject_fallback,
+                addresses=tuple(sorted({address for _, _, address in role_addresses})),
+                sent_timestamp=message_timestamp,
+            )
             existing = connection.execute(
                 "SELECT id FROM messages WHERE dedup_key = ?", (dedup_key,)
             ).fetchone()
@@ -493,10 +699,10 @@ class IndexDatabase:
                         metadata.subject,
                         normalized_subject,
                         metadata.date,
-                        _parse_message_timestamp(metadata.date),
+                        message_timestamp,
                         metadata.in_reply_to,
                         metadata.references,
-                        metadata.text_body,
+                        "",
                         content_hash,
                     ),
                 )
@@ -506,8 +712,7 @@ class IndexDatabase:
                 connection.execute(
                     """
                     UPDATE messages
-                    SET body = CASE WHEN body = '' THEN ? ELSE body END,
-                        subject = CASE WHEN subject = '' THEN ? ELSE subject END,
+                    SET subject = CASE WHEN subject = '' THEN ? ELSE subject END,
                         normalized_message_id = CASE
                             WHEN normalized_message_id = '' THEN ?
                             ELSE normalized_message_id
@@ -522,45 +727,35 @@ class IndexDatabase:
                     WHERE id = ?
                     """,
                     (
-                        metadata.text_body,
                         metadata.subject,
                         _normalize_message_id(metadata.message_id or ""),
                         normalized_subject,
                         metadata.date,
-                        _parse_message_timestamp(metadata.date),
+                        message_timestamp,
                         metadata.in_reply_to,
                         metadata.references,
                         message_id,
                     ),
                 )
 
-            for role, addresses in (
-                ("from", metadata.from_addresses),
-                ("to", metadata.to_addresses),
-                ("cc", metadata.cc_addresses),
-                ("bcc", metadata.bcc_addresses),
-            ):
-                for address in addresses:
-                    normalized_address = address.strip().casefold()
-                    if not normalized_address:
-                        continue
-                    display_name = _participant_display_name(
-                        metadata, role, normalized_address
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO participants(
-                            message_id, role, address, display_name
-                        ) VALUES (?, ?, ?, ?)
-                        ON CONFLICT(message_id, role, address)
-                        DO UPDATE SET display_name = CASE
-                            WHEN participants.display_name = ''
-                            THEN excluded.display_name
-                            ELSE participants.display_name
-                        END
-                        """,
-                        (message_id, role, normalized_address, display_name),
-                    )
+            for role, observed_address, normalized_address in role_addresses:
+                display_name = _participant_display_name(
+                    metadata, role, observed_address
+                )
+                connection.execute(
+                    """
+                    INSERT INTO participants(
+                        message_id, role, address, display_name
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(message_id, role, address)
+                    DO UPDATE SET display_name = CASE
+                        WHEN participants.display_name = ''
+                        THEN excluded.display_name
+                        ELSE participants.display_name
+                    END
+                    """,
+                    (message_id, role, normalized_address, display_name),
+                )
             connection.executemany(
                 """
                 INSERT OR IGNORE INTO attachments(
@@ -582,9 +777,13 @@ class IndexDatabase:
                 ],
             )
             message = connection.execute(
-                "SELECT subject, body FROM messages WHERE id = ?",
+                "SELECT subject FROM messages WHERE id = ?",
                 (message_id,),
             ).fetchone()
+            indexed = connection.execute(
+                "SELECT body FROM messages_fts WHERE rowid = ?", (message_id,)
+            ).fetchone()
+            body = indexed["body"] if indexed is not None and indexed["body"] else ""
             indexed_attachment_names = connection.execute(
                 "SELECT filename FROM attachments WHERE message_id = ? ORDER BY filename",
                 (message_id,),
@@ -600,7 +799,7 @@ class IndexDatabase:
                 (
                     message_id,
                     message["subject"],
-                    message["body"],
+                    body or metadata.text_body,
                     ", ".join(row["filename"] for row in indexed_attachment_names),
                 ),
             )
@@ -670,8 +869,11 @@ class IndexDatabase:
             raise ValueError("Search result limit must be positive")
         if person_ids is not None and not person_ids:
             return []
+        match = fts_query(query)
+        if not match:
+            return []
         person_filter = ""
-        parameters: list[object] = [query]
+        parameters: list[object] = [match]
         if person_ids is not None:
             role_filter = "" if include_cc_bcc else "AND participant.role IN ('from', 'to')"
             placeholders = ", ".join("?" for _ in person_ids)
@@ -688,7 +890,7 @@ class IndexDatabase:
             """
             parameters.extend(person_ids)
         parameters.append(limit)
-        with self.connection() as connection:
+        with self.connection() as connection, _fts_errors():
             return list(
                 connection.execute(
                     """
@@ -765,83 +967,102 @@ class IndexDatabase:
         """List indexed occurrences with optional archive-browser filters."""
         if limit <= 0 or offset < 0:
             raise ValueError("Archive pagination values are invalid")
-        filters: list[str] = []
-        parameters: list[object] = []
-        if query.strip():
-            filters.append("messages_fts MATCH ?")
-            parameters.append(query)
-        if source_id is not None:
-            filters.append("sources.id = ?")
-            parameters.append(source_id)
-        if folder_id is not None:
-            filters.append("folders.id = ?")
-            parameters.append(folder_id)
+
+        def occurrence_filters(alias: str) -> tuple[list[str], list[object]]:
+            """Build source/folder/state predicates for one occurrence alias."""
+            clauses: list[str] = []
+            values: list[object] = []
+            if source_id is not None:
+                clauses.append(f"{alias}.source_id = ?")
+                values.append(source_id)
+            if folder_id is not None:
+                clauses.append(f"{alias}.folder_id = ?")
+                values.append(folder_id)
+            if deleted_only:
+                clauses.append(f"{alias}.deleted = 1")
+            if item_type is not None:
+                clauses.append(f"{alias}.item_type = ?")
+                values.append(item_type)
+            return clauses, values
+
+        filters, parameters = occurrence_filters("occurrences")
+        match = fts_query(query)
+        if match:
+            filters.append(
+                "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+            )
+            parameters.append(match)
         if has_attachments:
             filters.append(
                 "EXISTS (SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
             )
-        if deleted_only:
-            filters.append("occurrences.deleted = 1")
-        if item_type is not None:
-            filters.append("occurrences.item_type = ?")
-            parameters.append(item_type)
-        where_clause = "WHERE " + " AND ".join(filters) if filters else ""
-        fts_join = (
-            "JOIN messages_fts ON messages_fts.rowid = messages.id"
-            if query.strip()
-            else ""
-        )
-        duplicate_filter = "" if include_duplicates else "AND ranked.copy_number = 1"
-        parameters.extend((limit, offset))
-        with self.connection() as connection:
-            return list(
-                connection.execute(
-                    """
-                    WITH matched AS (
-                        SELECT messages.id AS message_id, messages.subject,
-                               messages.sent_date, messages.sent_timestamp,
-                               messages.message_id AS internet_message_id,
-                               messages.thread_key, messages.content_hash,
-                               occurrences.id AS occurrence_id, occurrences.source_id,
-                               occurrences.folder_id, occurrences.locator_offset,
-                               occurrences.locator_length, occurrences.locator_folder_path,
-                               occurrences.locator_item_index, occurrences.locator_item_id,
-                               occurrences.message_hash, occurrences.deleted,
-                               occurrences.item_type, occurrences.error,
-                               sources.path AS source_path, sources.kind AS source_kind,
-                               sources.sha256_after, folders.path AS folder_path,
-                               folders.name AS folder_name,
-                               (SELECT group_concat(address, ', ')
-                                FROM participants
-                                WHERE participants.message_id = messages.id
-                                  AND participants.role = 'from') AS sender,
-                               count(*) OVER (PARTITION BY messages.id) AS copy_count,
-                               row_number() OVER (
-                                   PARTITION BY messages.id ORDER BY occurrences.id
-                               ) AS copy_number
-                        FROM messages
-                        """
-                    + fts_join
-                    + """
-                        JOIN occurrences ON occurrences.message_id = messages.id
-                        JOIN sources ON sources.id = occurrences.source_id
-                        LEFT JOIN folders ON folders.id = occurrences.folder_id
-                        """
-                    + where_clause
-                    + """
-                    )
-                    SELECT * FROM matched AS ranked
-                    WHERE 1 = 1
-                    """
-                    + duplicate_filter
-                    + """
-                    ORDER BY sent_date IS NULL, sent_date DESC, message_id DESC,
-                             occurrence_id
-                    LIMIT ? OFFSET ?
-                    """,
-                    parameters,
-                )
+        if not include_duplicates:
+            first_filters, first_parameters = occurrence_filters("first_copy")
+            filters.append(
+                """
+                occurrences.id = (
+                    SELECT min(first_copy.id) FROM occurrences AS first_copy
+                    WHERE first_copy.message_id = messages.id
+                """
+                + "".join(f" AND {clause}" for clause in first_filters)
+                + ")"
             )
+            parameters.extend(first_parameters)
+        where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+        with self.connection() as connection, _fts_errors():
+            # Page over two integer columns first, so that the expensive
+            # per-row details are only computed for the visible page.
+            page = connection.execute(
+                """
+                SELECT occurrences.id AS occurrence_id
+                FROM messages
+                JOIN occurrences ON occurrences.message_id = messages.id
+                """
+                + where_clause
+                + """
+                ORDER BY messages.sent_timestamp DESC, messages.id DESC,
+                         occurrences.id
+                LIMIT ? OFFSET ?
+                """,
+                [*parameters, limit, offset],
+            ).fetchall()
+            occurrence_ids = [int(row["occurrence_id"]) for row in page]
+            if not occurrence_ids:
+                return []
+            rows = connection.execute(
+                f"""
+                SELECT messages.id AS message_id, messages.subject,
+                       messages.sent_date, messages.sent_timestamp,
+                       messages.message_id AS internet_message_id,
+                       messages.thread_key, messages.content_hash,
+                       occurrences.id AS occurrence_id, occurrences.source_id,
+                       occurrences.folder_id, occurrences.locator_offset,
+                       occurrences.locator_length, occurrences.locator_folder_path,
+                       occurrences.locator_item_index, occurrences.locator_item_id,
+                       occurrences.message_hash, occurrences.deleted,
+                       occurrences.item_type, occurrences.error,
+                       sources.path AS source_path, sources.kind AS source_kind,
+                       sources.sha256_after, folders.path AS folder_path,
+                       folders.name AS folder_name,
+                       (SELECT group_concat(address, ', ')
+                        FROM participants
+                        WHERE participants.message_id = messages.id
+                          AND participants.role = 'from') AS sender,
+                       (SELECT count(*) FROM occurrences AS copies
+                        WHERE copies.message_id = messages.id) AS copy_count,
+                       (SELECT count(*) FROM occurrences AS earlier
+                        WHERE earlier.message_id = messages.id
+                          AND earlier.id <= occurrences.id) AS copy_number
+                FROM occurrences
+                JOIN messages ON messages.id = occurrences.message_id
+                JOIN sources ON sources.id = occurrences.source_id
+                LEFT JOIN folders ON folders.id = occurrences.folder_id
+                WHERE occurrences.id IN ({", ".join("?" for _ in occurrence_ids)})
+                """,
+                occurrence_ids,
+            ).fetchall()
+        position = {occurrence_id: index for index, occurrence_id in enumerate(occurrence_ids)}
+        return sorted(rows, key=lambda row: position[int(row["occurrence_id"])])
 
     def detailed_search(
         self,
@@ -909,7 +1130,10 @@ class IndexDatabase:
                         )
                         """
                     )
-                    parameters.append(f'"{value.replace(chr(34), chr(34) * 2)}"')
+                    match = fts_query(value)
+                    if not match:
+                        raise ValueError("A szöveges keresés nem tartalmaz kereshető szót.")
+                    parameters.append(match)
                 else:
                     expression_parts.append(
                         "casefold(messages.subject) LIKE ? ESCAPE '\\'"
@@ -1018,66 +1242,73 @@ class IndexDatabase:
             where_clause = f" {operator} ".join(grouped_expressions)
         else:
             where_clause = f" {operator} ".join(expression_parts)
-        with self.connection() as connection:
+        with self.connection() as connection, _fts_errors():
             total_row = connection.execute(
                 f"SELECT count(*) AS count FROM messages WHERE {where_clause}",
                 parameters,
             ).fetchone()
-            rows = list(
-                connection.execute(
+            page = connection.execute(
+                f"""
+                SELECT id FROM messages WHERE {where_clause}
+                ORDER BY sent_timestamp DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*parameters, limit, offset],
+            ).fetchall()
+            message_ids = [int(row["id"]) for row in page]
+            rows: list[sqlite3.Row] = []
+            if message_ids:
+                rows = connection.execute(
                     f"""
-                    WITH matched AS (
-                        SELECT messages.id AS message_id, messages.subject,
-                               messages.sent_date, messages.sent_timestamp,
-                               messages.message_id AS internet_message_id,
-                               messages.thread_key, messages.content_hash,
-                               occurrences.id AS occurrence_id, occurrences.source_id,
-                               occurrences.folder_id, occurrences.locator_offset,
-                               occurrences.locator_length, occurrences.locator_folder_path,
-                               occurrences.locator_item_index, occurrences.locator_item_id,
-                               occurrences.message_hash, occurrences.deleted,
-                               occurrences.item_type, occurrences.error,
-                               sources.path AS source_path, sources.kind AS source_kind,
-                               folders.path AS folder_path, folders.name AS folder_name,
-                               (
-                                   SELECT group_concat(address, ', ')
-                                   FROM participants
-                                   WHERE participants.message_id = messages.id
-                                     AND participants.role = 'from'
-                               ) AS sender,
-                               (
-                                   SELECT group_concat(DISTINCT address)
-                                   FROM participants
-                                   WHERE participants.message_id = messages.id
-                                     AND participants.role IN ('from', 'to')
-                               ) AS participant_addresses,
-                               (
-                                   SELECT group_concat(DISTINCT occurrence_labels.label)
-                                   FROM occurrences AS labeled_occurrence
-                                   JOIN occurrence_labels
-                                     ON occurrence_labels.occurrence_id = labeled_occurrence.id
-                                   WHERE labeled_occurrence.message_id = messages.id
-                               ) AS labels,
-                               count(*) OVER (PARTITION BY messages.id) AS copy_count,
-                               row_number() OVER (
-                                   PARTITION BY messages.id ORDER BY occurrences.id
-                               ) AS copy_number
-                        FROM messages
-                        JOIN occurrences ON occurrences.message_id = messages.id
-                        JOIN sources ON sources.id = occurrences.source_id
-                        LEFT JOIN folders ON folders.id = occurrences.folder_id
-                        WHERE messages.id IN (
-                            SELECT id FROM messages WHERE {where_clause}
-                        )
+                    SELECT messages.id AS message_id, messages.subject,
+                           messages.sent_date, messages.sent_timestamp,
+                           messages.message_id AS internet_message_id,
+                           messages.thread_key, messages.content_hash,
+                           occurrences.id AS occurrence_id, occurrences.source_id,
+                           occurrences.folder_id, occurrences.locator_offset,
+                           occurrences.locator_length, occurrences.locator_folder_path,
+                           occurrences.locator_item_index, occurrences.locator_item_id,
+                           occurrences.message_hash, occurrences.deleted,
+                           occurrences.item_type, occurrences.error,
+                           sources.path AS source_path, sources.kind AS source_kind,
+                           folders.path AS folder_path, folders.name AS folder_name,
+                           (
+                               SELECT group_concat(address, ', ')
+                               FROM participants
+                               WHERE participants.message_id = messages.id
+                                 AND participants.role = 'from'
+                           ) AS sender,
+                           (
+                               SELECT group_concat(DISTINCT address)
+                               FROM participants
+                               WHERE participants.message_id = messages.id
+                                 AND participants.role IN ('from', 'to')
+                           ) AS participant_addresses,
+                           (
+                               SELECT group_concat(DISTINCT occurrence_labels.label)
+                               FROM occurrences AS labeled_occurrence
+                               JOIN occurrence_labels
+                                 ON occurrence_labels.occurrence_id = labeled_occurrence.id
+                               WHERE labeled_occurrence.message_id = messages.id
+                           ) AS labels,
+                           (
+                               SELECT count(*) FROM occurrences AS copies
+                               WHERE copies.message_id = messages.id
+                           ) AS copy_count,
+                           1 AS copy_number
+                    FROM messages
+                    JOIN occurrences ON occurrences.id = (
+                        SELECT min(first_copy.id) FROM occurrences AS first_copy
+                        WHERE first_copy.message_id = messages.id
                     )
-                    SELECT * FROM matched
-                    WHERE copy_number = 1
-                    ORDER BY sent_timestamp IS NULL, sent_timestamp DESC, message_id DESC
-                    LIMIT ? OFFSET ?
+                    JOIN sources ON sources.id = occurrences.source_id
+                    LEFT JOIN folders ON folders.id = occurrences.folder_id
+                    WHERE messages.id IN ({", ".join("?" for _ in message_ids)})
                     """,
-                    [*parameters, limit, offset],
-                )
-            )
+                    message_ids,
+                ).fetchall()
+        position = {message_id: index for index, message_id in enumerate(message_ids)}
+        rows = sorted(rows, key=lambda row: position[int(row["message_id"])])
         return rows, int(total_row["count"])
 
     def set_message_label(
@@ -1180,9 +1411,14 @@ class IndexDatabase:
         with self.connection() as connection:
             return connection.execute(
                 """
-                SELECT id, subject, sent_date, message_id AS internet_message_id,
-                       thread_key, in_reply_to, references_header, body, content_hash
-                FROM messages WHERE id = ?
+                SELECT messages.id, messages.subject, messages.sent_date,
+                       messages.message_id AS internet_message_id,
+                       messages.thread_key, messages.in_reply_to,
+                       messages.references_header,
+                       coalesce(messages_fts.body, '') AS body, messages.content_hash
+                FROM messages
+                LEFT JOIN messages_fts ON messages_fts.rowid = messages.id
+                WHERE messages.id = ?
                 """,
                 (message_id,),
             ).fetchone()
@@ -1250,24 +1486,23 @@ class IndexDatabase:
         elif mode == "between":
             filters.extend(
                 (
+                    # A selected sender must write to a different selected
+                    # person; a note to oneself is not a conversation.
                     f"""
                     EXISTS (
                         SELECT 1 FROM participants AS sender
                         JOIN person_addresses AS sender_person
                           ON sender_person.address = sender.address
+                        JOIN participants AS recipient
+                          ON recipient.message_id = sender.message_id
+                         AND recipient.role = 'to'
+                        JOIN person_addresses AS recipient_person
+                          ON recipient_person.address = recipient.address
                         WHERE sender.message_id = messages.id
                           AND sender.role = 'from'
                           AND sender_person.person_id IN ({placeholders})
-                    )
-                    """,
-                    f"""
-                    EXISTS (
-                        SELECT 1 FROM participants AS recipient
-                        JOIN person_addresses AS recipient_person
-                          ON recipient_person.address = recipient.address
-                        WHERE recipient.message_id = messages.id
-                          AND recipient.role = 'to'
                           AND recipient_person.person_id IN ({placeholders})
+                          AND recipient_person.person_id != sender_person.person_id
                     )
                     """,
                     f"""
@@ -1288,9 +1523,12 @@ class IndexDatabase:
             parameters.extend(person_ids)
             parameters.extend(person_ids)
             parameters.extend(person_ids)
-        if query.strip():
-            filters.append("messages_fts MATCH ?")
-            parameters.append(query)
+        match = fts_query(query)
+        if match:
+            filters.append(
+                "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+            )
+            parameters.append(match)
         if thread_key:
             filters.append("messages.thread_key = ?")
             parameters.append(thread_key)
@@ -1301,22 +1539,16 @@ class IndexDatabase:
             filters.append("messages.sent_timestamp < ?")
             parameters.append(date_to_timestamp)
         parameters.append(limit)
-        fts_join = (
-            "JOIN messages_fts ON messages_fts.rowid = messages.id"
-            if query.strip()
-            else ""
-        )
-        with self.connection() as connection:
+        with self.connection() as connection, _fts_errors():
             return list(
                 connection.execute(
                     """
                     SELECT messages.id AS message_id, messages.subject,
                            messages.sent_date, messages.message_id AS internet_message_id,
-                           messages.thread_key, messages.body, messages.content_hash
+                           messages.thread_key, messages_fts.body AS body,
+                           messages.content_hash
                     FROM messages
-                    """
-                    + fts_join
-                    + """
+                    LEFT JOIN messages_fts ON messages_fts.rowid = messages.id
                     WHERE """
                     + " AND ".join(filters)
                     + """
@@ -1646,7 +1878,7 @@ class IndexDatabase:
                            in_reply_to, references_header
                     FROM messages
                     WHERE thread_key = ?
-                    ORDER BY sent_date IS NULL, sent_date, id
+                    ORDER BY sent_timestamp IS NULL, sent_timestamp, id
                     """,
                     (thread_key,),
                 )
@@ -1682,6 +1914,71 @@ def _parse_message_timestamp(sent_date: str | None) -> int | None:
         return calendar.timegm(parsed.astimezone(timezone.utc).utctimetuple())
     except (OverflowError, ValueError):
         return None
+
+
+def fts_query(text: str) -> str:
+    """Translate user search text into a safe FTS5 query with prefix matching.
+
+    Plain words match as prefixes, so "szerződés" also finds "szerződést";
+    quoted text is an exact phrase; AND, OR, NOT and balanced parentheses are
+    kept as operators. Other FTS5 syntax is neutralized.
+    """
+    items: list[str] = []
+    for phrase, opening, closing, word in _FTS_TOKEN.findall(text):
+        if opening or closing:
+            items.append(opening or closing)
+        elif word in _FTS_OPERATORS:
+            items.append(word)
+        elif word:
+            pieces = _FTS_WORD.findall(word)
+            if pieces:
+                items.append('"' + " ".join(pieces) + '"*')
+        else:
+            pieces = _FTS_WORD.findall(phrase)
+            if pieces:
+                items.append('"' + " ".join(pieces) + '"')
+
+    depth = 0
+    for item in items:
+        depth += 1 if item == "(" else -1 if item == ")" else 0
+        if depth < 0:
+            break
+    if depth != 0:
+        items = [item for item in items if item not in {"(", ")"}]
+
+    cleaned: list[str] = []
+    for item in items:
+        previous = cleaned[-1] if cleaned else None
+        if item in _FTS_OPERATORS:
+            if previous is None or previous in _FTS_OPERATORS or previous == "(":
+                continue
+        elif item == ")":
+            while cleaned and cleaned[-1] in _FTS_OPERATORS:
+                cleaned.pop()
+            if cleaned and cleaned[-1] == "(":
+                cleaned.pop()
+                continue
+        cleaned.append(item)
+    while cleaned and (cleaned[-1] in _FTS_OPERATORS or cleaned[-1] == "("):
+        cleaned.pop()
+    if not any(item.startswith('"') for item in cleaned):
+        return ""
+    return " ".join(cleaned)
+
+
+@contextmanager
+def _fts_errors() -> Generator[None, None, None]:
+    """Report full-text query problems in Hungarian instead of raw SQLite text."""
+    try:
+        yield
+    except sqlite3.OperationalError as error:
+        message = str(error).casefold()
+        if "fts5" in message or "syntax error" in message or "malformed match" in message:
+            raise ValueError(
+                "A keresőkifejezés nem értelmezhető. Használjon szavakat, "
+                '"idézőjeles kifejezést", valamint AND, OR, NOT operátort.'
+            ) from error
+        raise
 
 
 def _search_date_timestamp(value: str, *, next_day: bool) -> int:

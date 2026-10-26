@@ -9,6 +9,7 @@ import threading
 import webbrowser
 
 from .app import create_server
+from .applog import configure_logging
 
 
 def _notify_startup_problem(message: str) -> None:
@@ -26,10 +27,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local Mail-Scope application.")
     parser.add_argument("--port", type=int, default=8765, help="Local HTTP port.")
     arguments = parser.parse_args()
-    if getattr(sys, "frozen", False) and sys.stderr is None:
-        logging.basicConfig(level=logging.INFO, handlers=[logging.NullHandler()])
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    log_path = configure_logging()
+    logging.getLogger(__name__).info("Mail-Scope application log: %s", log_path)
     try:
         http_server = create_server(port=arguments.port)
     except OSError as error:

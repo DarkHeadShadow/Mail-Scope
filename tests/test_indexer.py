@@ -9,6 +9,7 @@ import unittest
 from email import policy
 from email.message import EmailMessage
 from pathlib import Path
+from unittest.mock import patch
 
 from indexer import IndexDatabase, IndexingService, PersonDirectory
 from sources.discover import discover_sources
@@ -28,6 +29,7 @@ def _mail(
     in_reply_to: str | None = None,
     labels: str | None = None,
     attachment: bool = False,
+    sent_date: str = "Sat, 1 Jan 2022 00:00:00 +0000",
 ) -> bytes:
     """Build a fictional RFC 5322 message for indexer tests."""
     message = EmailMessage()
@@ -40,7 +42,7 @@ def _mail(
     message["Subject"] = subject
     if message_id is not None:
         message["Message-ID"] = message_id
-    message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+    message["Date"] = sent_date
     if references is not None:
         message["References"] = references
     if in_reply_to is not None:
@@ -192,10 +194,99 @@ class IndexerTests(unittest.TestCase):
             self.case_directory / ".mailscope" / "index.sqlite3",
         )
         self.assertEqual(self.database.metadata_value("creator"), "Bálint Szabolcs")
-
         repeated = self.service.index_sources(discover_sources(self.case_directory))
         self.assertEqual(repeated.sources_skipped, 2)
         self.assertEqual(self.database.occurrence_count(), 3)
+
+    def test_archive_orders_by_parsed_timestamp_not_date_header_text(self) -> None:
+        """Use normalized timestamps when weekday text conflicts with date order."""
+        source = self.case_directory / "date-order.mbox"
+        source.write_bytes(
+            _mail(
+                message_id="<jan-three@example.test>",
+                subject="Jan 3",
+                body="Monday message",
+                sent_date="Mon, 3 Jan 2022 00:00:00 +0000",
+            )
+            + _mail(
+                message_id="<jan-two@example.test>",
+                subject="Jan 2",
+                body="Sunday message",
+                sent_date="Sun, 2 Jan 2022 00:00:00 +0000",
+            )
+            + _mail(
+                message_id="<jan-five@example.test>",
+                subject="Jan 5",
+                body="Wednesday message",
+                sent_date="Wed, 5 Jan 2022 00:00:00 +0000",
+            )
+        )
+        self.service.index_sources(discover_sources(source))
+
+        messages = self.database.archive_messages()
+
+        self.assertEqual([row["subject"] for row in messages], ["Jan 5", "Jan 3", "Jan 2"])
+
+    def test_message_index_uses_one_database_connection_and_wal(self) -> None:
+        source = self.case_directory / "single-message.mbox"
+        source.write_bytes(
+            _mail(
+                message_id="<single@example.test>",
+                subject="Single message",
+                body="Single-message transaction",
+            )
+        )
+
+        larger = self.case_directory / "three-messages.mbox"
+        larger.write_bytes(
+            b"".join(
+                _mail(
+                    message_id=f"<batch-{index}@example.test>",
+                    subject=f"Batch {index}",
+                    body="Batched transaction",
+                )
+                for index in range(3)
+            )
+        )
+        call_counts = []
+        for mailbox in (source, larger):
+            with patch.object(
+                self.database,
+                "connection",
+                wraps=self.database.connection,
+            ) as connection:
+                summary = self.service.index_sources(discover_sources(mailbox))
+            call_counts.append(connection.call_count)
+
+        self.assertEqual(summary.messages_indexed, 3)
+        # Messages share one batched transaction, so the number of database
+        # connections does not depend on the number of messages.
+        self.assertEqual(call_counts[0], call_counts[1])
+        with self.database.connection() as database_connection:
+            journal_mode = database_connection.execute(
+                "PRAGMA journal_mode"
+            ).fetchone()[0]
+        self.assertEqual(journal_mode.casefold(), "wal")
+
+    def test_subject_thread_fallback_uses_normalized_subject_index(self) -> None:
+        with self.database.connection() as connection:
+            query_plan = connection.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT thread_key FROM messages
+                WHERE normalized_subject = ?
+                ORDER BY id LIMIT 1
+                """,
+                ("project subject",),
+            ).fetchall()
+
+        self.assertTrue(
+            any(
+                "idx_messages_normalized_subject" in str(row["detail"])
+                for row in query_plan
+            ),
+            [row["detail"] for row in query_plan],
+        )
 
     def test_cancellation_resumes_from_last_committed_message(self) -> None:
         """Commit each message so cancelling and rerunning resumes without loss."""
@@ -474,6 +565,283 @@ class IndexerTests(unittest.TestCase):
             4,
         )
 
+    def test_subject_fallback_needs_reply_prefix_shared_person_and_nearby_date(self) -> None:
+        """Keep recurring subjects apart unless a nearby reply shares a participant."""
+        mailbox = self.case_directory / "recurring.mbox"
+        mailbox.write_bytes(
+            _mail(
+                message_id="<szamla-januar@example.test>",
+                subject="Számla",
+                body="Januári számla.",
+                sent_date="Mon, 10 Jan 2022 09:00:00 +0000",
+            )
+            + _mail(
+                message_id="<szamla-julius@example.test>",
+                subject="Számla",
+                body="Júliusi számla.",
+                sent_date="Mon, 11 Jul 2022 09:00:00 +0000",
+            )
+            + _mail(
+                message_id="<re-szamla-julius@example.test>",
+                subject="Re: Számla",
+                body="Köszönöm, megkaptam.",
+                from_address="anna@pelda.hu",
+                to_address="antal@pelda.hu",
+                sent_date="Tue, 12 Jul 2022 09:00:00 +0000",
+            )
+            + _mail(
+                message_id="<re-szamla-idegen@example.test>",
+                subject="Re: Számla",
+                body="Egészen más ügy.",
+                from_address="cecil@pelda.hu",
+                to_address="dora@pelda.hu",
+                sent_date="Wed, 13 Jul 2022 09:00:00 +0000",
+            )
+            + _mail(
+                message_id=None,
+                subject="",
+                body="Tárgy nélküli első levél.",
+            )
+            + _mail(
+                message_id=None,
+                subject="",
+                body="Tárgy nélküli második levél.",
+            )
+        )
+        self.service.index_sources(discover_sources(mailbox))
+
+        with self.database.connection() as connection:
+            keys = [
+                row["thread_key"]
+                for row in connection.execute("SELECT thread_key FROM messages ORDER BY id")
+            ]
+
+        self.assertEqual(len(keys), 6)
+        self.assertNotEqual(keys[0], keys[1])
+        self.assertEqual(keys[2], keys[1])
+        self.assertNotIn(keys[3], {keys[0], keys[1]})
+        self.assertNotEqual(keys[4], keys[5])
+
+    def test_fixed_in_reply_to_of_notifications_does_not_form_one_thread(self) -> None:
+        """Split messages that only share an absent parent but not their subject."""
+        notifications = b"".join(
+            _mail(
+                message_id=f"<ertesites-{index}@example.test>",
+                subject=f"Értesítés {index}. ügyiratról",
+                body="Automatikus értesítés.",
+                from_address="ertesito@pelda.hu",
+                in_reply_to="<allando@pelda.hu>",
+            )
+            for index in range(4)
+        )
+        replies = _mail(
+            message_id="<valasz-1@example.test>",
+            subject="Re: Hiányzó első levél",
+            body="Válasz.",
+            in_reply_to="<hianyzo@example.test>",
+        ) + _mail(
+            message_id="<valasz-2@example.test>",
+            subject="Re: Re: Hiányzó első levél",
+            body="Második válasz.",
+            references="<hianyzo@example.test> <valasz-1@example.test>",
+        )
+        mailbox = self.case_directory / "notifications.mbox"
+        mailbox.write_bytes(notifications + replies)
+
+        self.service.index_sources(discover_sources(mailbox))
+
+        with self.database.connection() as connection:
+            keys = [
+                row["thread_key"]
+                for row in connection.execute("SELECT thread_key FROM messages ORDER BY id")
+            ]
+        self.assertEqual(len(set(keys[:4])), 4)
+        self.assertEqual(keys[4], keys[5])
+
+    def test_one_failing_source_does_not_stop_the_others(self) -> None:
+        """Record an unreadable source as failed and continue with the next one."""
+        broken = self.case_directory / "a-broken.mbox"
+        broken.write_bytes(_mail(message_id="<broken@example.test>", subject="A", body="A"))
+        healthy = self.case_directory / "b-healthy.mbox"
+        healthy.write_bytes(_mail(message_id="<healthy@example.test>", subject="B", body="B"))
+
+        from sources.reader_factory import open_source
+
+        def reader_factory(source):
+            if source.path == broken:
+                raise IndexError("synthetic parser failure")
+            return open_source(source)
+
+        summary = self.service.index_sources(
+            discover_sources(self.case_directory), reader_factory=reader_factory
+        )
+
+        self.assertEqual(summary.status, "completed_with_errors")
+        self.assertEqual(summary.sources_failed, 1)
+        self.assertEqual(summary.sources_completed, 1)
+        self.assertEqual(self.database.message_count(), 1)
+        statuses = {Path(row["path"]).name: row["status"] for row in self.database.sources()}
+        self.assertEqual(statuses, {"a-broken.mbox": "failed", "b-healthy.mbox": "completed"})
+
+    def test_reuses_discovery_hash_when_file_signature_is_unchanged(self) -> None:
+        """Hash a source once at discovery and once after indexing, not three times."""
+        mailbox = self.case_directory / "hash-count.mbox"
+        mailbox.write_bytes(_mail(message_id="<hash@example.test>", subject="H", body="H"))
+        sources = discover_sources(mailbox)
+
+        with patch("indexer.service.hash_source", wraps=__import__(
+            "sources.discover", fromlist=["hash_source"]
+        ).hash_source) as hashing:
+            summary = self.service.index_sources(sources)
+
+        self.assertEqual(summary.status, "completed")
+        self.assertEqual(hashing.call_count, 1)
+        self.assertIsNotNone(self.database.verified_source(str(mailbox)))
+
+    def test_prefix_search_and_hungarian_query_errors(self) -> None:
+        """Find inflected Hungarian words and never surface raw FTS5 syntax errors."""
+        mailbox = self.case_directory / "search.mbox"
+        mailbox.write_bytes(
+            _mail(
+                message_id="<szerzodes@example.test>",
+                subject="Megállapodás",
+                body="Kérem, küldje el a szerződést aláírva.",
+            )
+        )
+        self.service.index_sources(discover_sources(mailbox))
+
+        self.assertEqual(len(self.database.archive_messages("szerződés")), 1)
+        self.assertEqual(len(self.database.archive_messages('"a szerződést"')), 1)
+        self.assertEqual(len(self.database.archive_messages("szerződés NOT aláírva")), 0)
+        # Operators without any searchable word behave like an empty query.
+        self.assertEqual(len(self.database.archive_messages("((( OR")), 1)
+        self.assertEqual(len(self.database.archive_messages('szerz* AND "')), 1)
+        rows, total = self.database.detailed_search(
+            ({"field": "text", "value": "szerződés"},), operator="AND"
+        )
+        self.assertEqual(total, 1)
+
+        from indexer.database import fts_query
+
+        self.assertEqual(fts_query("szerződés"), '"szerződés"*')
+        self.assertEqual(fts_query("anna@pelda.hu"), '"anna pelda hu"*')
+        self.assertEqual(fts_query('OR "pontos kifejezés" AND'), '"pontos kifejezés"')
+        self.assertEqual(fts_query("(a OR b"), '"a"* OR "b"*')
+        self.assertEqual(fts_query("NEAR(x y) ^z"), '"NEAR"* ( "x"* "y"* ) "z"*')
+        self.assertEqual(fts_query("   "), "")
+
+    def test_body_is_stored_once_in_the_full_text_index(self) -> None:
+        """Keep message bodies only in FTS while details still return the body."""
+        mailbox = self.case_directory / "body.mbox"
+        mailbox.write_bytes(
+            _mail(message_id="<body@example.test>", subject="Törzs", body="Egyszer tárolt törzs.")
+        )
+        self.service.index_sources(discover_sources(mailbox))
+
+        with self.database.connection() as connection:
+            stored = connection.execute("SELECT id, body FROM messages").fetchone()
+        self.assertEqual(stored["body"], "")
+        details = self.database.message_details(int(stored["id"]))
+        assert details is not None
+        self.assertIn("Egyszer tárolt törzs.", details["body"])
+
+    def test_between_mode_excludes_notes_to_self(self) -> None:
+        """A message from a person to themselves is not part of a two-person conversation."""
+        mailbox = self.case_directory / "self.mbox"
+        mailbox.write_bytes(
+            _mail(
+                message_id="<self@example.test>",
+                subject="Saját jegyzet",
+                body="Emlékeztető.",
+                to_address="antal@pelda.hu",
+            )
+            + _mail(
+                message_id="<pair@example.test>",
+                subject="Kettőnk között",
+                body="Valódi levélváltás.",
+            )
+        )
+        self.service.index_sources(discover_sources(mailbox))
+        directory = PersonDirectory(self.database)
+        antal = directory.create_person("Teszt Antal", ("antal@pelda.hu",))
+        anna = directory.create_person("Teszt Anna", ("anna@pelda.hu",))
+
+        rows = self.database.conversation_messages(
+            (antal.id, anna.id), mode="between", include_cc_bcc=False
+        )
+
+        self.assertEqual([row["subject"] for row in rows], ["Kettőnk között"])
+
+    def test_exchange_legacy_addresses_resolve_to_smtp(self) -> None:
+        """Map Exchange DN participants to SMTP once any message reveals the pair."""
+        from indexer.service import _message_keys
+        from sources.models import MessageLocator, MessageMetadata
+
+        source_id, _ = self.database.register_source(
+            path=str(self.case_directory / "synthetic.pst"),
+            kind="pst",
+            size=1,
+            discovered_sha256="0" * 64,
+            sha256_before="0" * 64,
+        )
+        folder_id = self.database.add_folder(source_id, "Sent Items", "Sent Items")
+        legacy = "/O=PELDA/OU=EXCHANGE ADMINISTRATIVE GROUP (FYDIBOHF23SPDLT)/CN=RECIPIENTS/CN=ANTAL"
+        sent_only_dn = MessageMetadata(
+            locator=MessageLocator(0, 0, "Sent Items", 0, "1"),
+            folder="Sent Items",
+            subject="Elküldött",
+            from_addresses=(legacy,),
+            to_addresses=("anna@pelda.hu",),
+            cc_addresses=(),
+            bcc_addresses=(),
+            date="Sat, 1 Jan 2022 00:00:00 +0000",
+            message_id="<sent-dn@example.test>",
+            in_reply_to=None,
+            references=None,
+            attachment_names=(),
+            participant_names=(("from", legacy, "Teszt Antal"),),
+        )
+        revealing = MessageMetadata(
+            locator=MessageLocator(0, 0, "Sent Items", 1, "2"),
+            folder="Sent Items",
+            subject="Másik",
+            from_addresses=("antal@pelda.hu",),
+            to_addresses=("anna@pelda.hu",),
+            cc_addresses=(),
+            bcc_addresses=(),
+            date="Sun, 2 Jan 2022 00:00:00 +0000",
+            message_id="<reveal@example.test>",
+            in_reply_to=None,
+            references=None,
+            attachment_names=(),
+            address_aliases=((legacy, "antal@pelda.hu"),),
+        )
+        for metadata in (sent_only_dn, revealing):
+            dedup_key, thread_key, normalized_subject, content_hash = _message_keys(
+                source_id, metadata
+            )
+            self.database.store_message(
+                source_id=source_id,
+                folder_id=folder_id,
+                metadata=metadata,
+                dedup_key=dedup_key,
+                thread_key=thread_key,
+                normalized_subject=normalized_subject,
+                content_hash=content_hash,
+                message_hash=content_hash,
+            )
+
+        self.database.resolve_address_aliases()
+
+        with self.database.connection() as connection:
+            senders = {
+                row["address"]
+                for row in connection.execute(
+                    "SELECT address FROM participants WHERE role = 'from'"
+                )
+            }
+        self.assertEqual(senders, {"antal@pelda.hu"})
+
     def test_migrates_existing_participant_table(self) -> None:
         """Upgrade a prior schema by adding display-name storage safely."""
         legacy_path = self.case_directory / "legacy.sqlite3"
@@ -558,7 +926,7 @@ class IndexerTests(unittest.TestCase):
                 "SELECT sent_timestamp FROM messages WHERE id = 1"
             ).fetchone()["sent_timestamp"]
         self.assertEqual(timestamp, 1640995200)
-        self.assertEqual(upgraded.metadata_value("schema_version"), "5")
+        self.assertEqual(upgraded.metadata_value("schema_version"), "6")
         self.assertIsNotNone(has_saved_searches)
 
     def test_detailed_search_labels_and_saved_searches(self) -> None:

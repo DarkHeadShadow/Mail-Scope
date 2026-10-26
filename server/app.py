@@ -9,7 +9,6 @@ import io
 import json
 import logging
 import mimetypes
-import os
 import re
 import sqlite3
 import threading
@@ -26,11 +25,18 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from indexer import IndexDatabase, IndexingJob, IndexingService, PersonDirectory
-from sources.models import MessageLocator
+from sources.models import MessageLocator, SourceReader
 from sources.content import message_body_text
-from sources.discover import DiscoveredSource, discover_sources, sha256_file
+from sources.discover import (
+    DiscoveredSource,
+    discover_sources,
+    hash_source,
+    source_signature,
+)
 from sources.reader_factory import open_source
 from version import __version__
+
+from .applog import application_log_path, attach_case_log
 
 
 logger = logging.getLogger(__name__)
@@ -106,9 +112,10 @@ class MailScopeApplication:
         self.indexing_service: IndexingService | None = None
         self.job: IndexingJob | None = None
         self._discovered: dict[str, DiscoveredSource] = {}
-        self._verified_sources: dict[
-            str, tuple[tuple[int, int, int, int, int], str]
-        ] = {}
+        self._verified_sources: dict[str, tuple[tuple[int, ...], str]] = {}
+        self._hash_locks: dict[str, threading.Lock] = {}
+        self._readers: dict[tuple[str, str], SourceReader] = {}
+        self.case_log: Path | None = None
 
     def select_case(self, path: str) -> dict[str, Any]:
         """Create or open a case directory and initialize its local index."""
@@ -127,17 +134,32 @@ class MailScopeApplication:
             case_path.mkdir(parents=True, exist_ok=True)
             self.case_directory = case_path
             self.database = IndexDatabase.for_case(case_path)
+            self.case_log = attach_case_log(case_path)
+            logger.info("Case opened: %s", case_path)
             self.indexing_service = IndexingService(self.database)
             self._discovered.clear()
             self._verified_sources.clear()
+            self._close_readers()
             self.job = None
             return self.status()
 
     def discover(self, path: str) -> list[dict[str, Any]]:
         """Scan one selected file or folder and retain its detected sources."""
         with self._lock:
-            self._require_case()
-            sources = discover_sources(path)
+            database = self._require_case()
+        # Hashing large sources must not block other requests (status, archive).
+        sources = discover_sources(path)
+        for source in sources:
+            logger.info(
+                "Source discovered: %s kind=%s size=%d sha256=%s",
+                source.path,
+                source.kind,
+                source.size,
+                source.sha256,
+            )
+        with self._lock:
+            if self.database is not database:
+                raise ApiError(HTTPStatus.CONFLICT, "Az ügy a felismerés közben megváltozott.")
             self._discovered = {str(source.path.resolve()): source for source in sources}
             return [_source_json(source) for source in sources]
 
@@ -187,6 +209,7 @@ class MailScopeApplication:
             if self.database is None or self.case_directory is None:
                 return {
                     "version": __version__,
+                    "log": {"application": _optional_path(application_log_path()), "case": None},
                     "case": None,
                     "sources": [],
                     "message_count": 0,
@@ -208,6 +231,10 @@ class MailScopeApplication:
                         job_data["error"] = str(error.__cause__ or error)
             return {
                 "version": __version__,
+                "log": {
+                    "application": _optional_path(application_log_path()),
+                    "case": _optional_path(self.case_log),
+                },
                 "case": {"path": str(self.case_directory), "name": self.case_directory.name},
                 "sources": [_row_json(row) for row in self.database.sources()],
                 "message_count": self.database.message_count(),
@@ -353,33 +380,65 @@ class MailScopeApplication:
                     "Mail-Scope-search.csv",
                 )
 
-            archive = BytesIO()
-            hashes: list[str] = []
-            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
-                total_raw_bytes = 0
-                for index, row in enumerate(rows, start=1):
-                    opened = self.open_message(int(row["message_id"]), include_raw=True)
-                    raw = opened["raw_eml"]
-                    total_raw_bytes += len(raw)
-                    if total_raw_bytes > 256 * 1024 * 1024:
-                        raise ApiError(
-                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                            "Az EML ZIP-export legfeljebb 256 MiB forráslevelet tartalmazhat.",
-                        )
-                    filename = _safe_eml_filename(
-                        index, str(row["subject"] or "level")
+            selected = [
+                (int(row["message_id"]), str(row["subject"] or "level")) for row in rows
+            ]
+        return (
+            self._eml_zip(selected),
+            "application/zip",
+            "Mail-Scope-search.eml.zip",
+        )
+
+    def _eml_zip(self, messages: list[tuple[int, str]]) -> bytes:
+        """Package messages as EML with a SHA-256 list and a provenance manifest.
+
+        MBOX and EML entries hold the original source bytes. Outlook stores no
+        original MIME, so PST/OST entries are reconstructions; MANIFEST.txt
+        records which entries are which.
+        """
+        archive = BytesIO()
+        hashes: list[str] = []
+        manifest: list[str] = [
+            "Mail-Scope EML export",
+            f"Mail-Scope {__version__} – készítő: Bálint Szabolcs",
+            "",
+            "fájl\tSHA-256\teredet\tforrásfájl\tforrás SHA-256\thely a forrásban",
+        ]
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+            total_raw_bytes = 0
+            for index, (message_id, subject) in enumerate(messages, start=1):
+                opened = self.open_message(message_id, include_raw=True)
+                raw = opened["raw_eml"]
+                total_raw_bytes += len(raw)
+                if total_raw_bytes > 256 * 1024 * 1024:
+                    raise ApiError(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        "Az EML ZIP-export legfeljebb 256 MiB forráslevelet tartalmazhat.",
                     )
-                    output.writestr(filename, raw)
-                    hashes.append(f"{hashlib.sha256(raw).hexdigest()}  {filename}")
-                output.writestr(
-                    "SHA256SUMS.txt",
-                    ("SHA-256:\n" + "\n".join(hashes) + "\n").encode("utf-8"),
+                filename = _safe_eml_filename(index, subject)
+                digest = hashlib.sha256(raw).hexdigest()
+                output.writestr(filename, raw)
+                hashes.append(f"{digest}  {filename}")
+                source = opened["raw_source"]
+                manifest.append(
+                    "\t".join(
+                        (
+                            filename,
+                            digest,
+                            (
+                                "PST/OST-ből rekonstruált (nem eredeti bájtok)"
+                                if source["reconstructed"]
+                                else "eredeti forrásbájtok"
+                            ),
+                            source["path"],
+                            source["sha256"],
+                            source["location"],
+                        )
+                    )
                 )
-            return (
-                archive.getvalue(),
-                "application/zip",
-                "Mail-Scope-search.eml.zip",
-            )
+            output.writestr("SHA256SUMS.txt", ("\n".join(hashes) + "\n").encode("utf-8"))
+            output.writestr("MANIFEST.txt", ("\n".join(manifest) + "\n").encode("utf-8"))
+        return archive.getvalue()
 
     def saved_searches(self) -> list[dict[str, Any]]:
         """Return named searches with their validated, decoded condition groups."""
@@ -614,21 +673,12 @@ class MailScopeApplication:
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 "Az EML ZIP-export legfeljebb 500 levelet tartalmazhat; szűkítse a keresést.",
             )
-        archive = BytesIO()
-        hashes: list[str] = []
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
-            for index, message in enumerate(messages, start=1):
-                opened = self.open_message(int(message["message_id"]), include_raw=True)
-                raw = opened["raw_eml"]
-                digest = hashlib.sha256(raw).hexdigest()
-                filename = _safe_eml_filename(index, str(message["subject"] or "level"))
-                output.writestr(filename, raw)
-                hashes.append(f"{digest}  {filename}")
-            output.writestr(
-                "SHA256SUMS.txt",
-                ("SHA-256: " + "\n".join(hashes) + "\n").encode("utf-8"),
-            )
-        return archive.getvalue()
+        return self._eml_zip(
+            [
+                (int(message["message_id"]), str(message["subject"] or "level"))
+                for message in messages
+            ]
+        )
 
     def open_message(
         self, message_id: int, *, include_raw: bool = False
@@ -642,26 +692,40 @@ class MailScopeApplication:
             occurrences = database.occurrences_for_message(message_id)
             if not occurrences:
                 raise ApiError(HTTPStatus.NOT_FOUND, "A levélnek nincs forrásbeli példánya.")
-            occurrence = occurrences[0]
-            source_path = Path(str(occurrence["source_path"]))
-            if not source_path.is_file():
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    "Az eredeti forrásfájl nem érhető el; a levél nem nyitható meg.",
-                )
-            expected_hash = str(occurrence["discovered_sha256"])
-            try:
-                actual_hash = self._verified_source_hash(source_path)
-            except OSError as error:
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    f"Az eredeti forrásfájl nem ellenőrizhető: {error}",
-                ) from error
-            if actual_hash != expected_hash:
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    "A forrásfájl az indexelés óta megváltozott; a forenzikus megnyitás leállt.",
-                )
+        occurrence = occurrences[0]
+        source_path = Path(str(occurrence["source_path"]))
+        source_kind = str(occurrence["source_kind"])
+        if not source_path.exists():
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "Az eredeti forrásfájl nem érhető el; a levél nem nyitható meg.",
+            )
+        expected_hash = str(occurrence["discovered_sha256"])
+        # Verification may hash a multi-gigabyte source; it runs outside the
+        # application lock so that status and browsing requests keep working.
+        try:
+            actual_hash = self._verified_source_hash(
+                database, source_path, source_kind
+            )
+        except OSError as error:
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                f"Az eredeti forrásfájl nem ellenőrizhető: {error}",
+            ) from error
+        if actual_hash != expected_hash:
+            logger.error(
+                "Source hash mismatch on open: %s expected=%s actual=%s",
+                source_path,
+                expected_hash,
+                actual_hash,
+            )
+            raise ApiError(
+                HTTPStatus.CONFLICT,
+                "A forrásfájl az indexelés óta megváltozott; a forenzikus megnyitás leállt.",
+            )
+        with self._lock:
+            if self.database is not database:
+                raise ApiError(HTTPStatus.CONFLICT, "Az ügy a megnyitás közben megváltozott.")
             source = DiscoveredSource(
                 path=source_path,
                 kind=str(occurrence["source_kind"]),
@@ -681,9 +745,11 @@ class MailScopeApplication:
                 item_id=str(occurrence["locator_item_id"] or "") or None,
             )
             try:
-                raw_message = open_source(source).open_message(locator)
+                reader = self._reader(source)
+                raw_message = reader.open_message(locator)
                 body = message_body_text(raw_message)
-            except (OSError, ValueError, IndexError, RuntimeError) as error:
+                raw_eml = reader.open_message_bytes(locator) if include_raw else None
+            except Exception as error:
                 logger.exception("Unable to open indexed message %s", message_id)
                 raise ApiError(
                     HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -703,22 +769,66 @@ class MailScopeApplication:
                 "opened_from_occurrence": int(occurrence["id"]),
             }
             if include_raw:
-                result["raw_eml"] = raw_message.as_bytes()
+                result["raw_eml"] = raw_eml
+                result["raw_source"] = {
+                    "reconstructed": source_kind in {"pst", "ost"},
+                    "path": str(source_path),
+                    "sha256": expected_hash,
+                    "location": _locator_text(locator),
+                }
             return result
 
-    def _verified_source_hash(self, source_path: Path) -> str:
-        """Hash each unchanged source once, invalidating the cache on file metadata changes."""
+    def _reader(self, source: DiscoveredSource) -> SourceReader:
+        """Reuse one reader per source, so PST/OST stores are not reopened per message."""
+        key = (str(source.path.resolve()), source.kind)
+        reader = self._readers.get(key)
+        if reader is None:
+            reader = open_source(source)
+            self._readers[key] = reader
+        return reader
+
+    def _close_readers(self) -> None:
+        """Release file handles held by cached source readers."""
+        readers, self._readers = self._readers, {}
+        for reader in readers.values():
+            try:
+                reader.close()
+            except Exception:
+                logger.exception("Unable to close source reader: %s", reader.path)
+
+    def close(self) -> None:
+        """Release cached source handles before the server stops."""
+        with self._lock:
+            self._close_readers()
+
+    def _verified_source_hash(
+        self, database: IndexDatabase, source_path: Path, kind: str
+    ) -> str:
+        """Return a source's SHA-256, re-hashing only when its file signature changed.
+
+        A full hash recorded at indexing or at an earlier open stays valid
+        while size, modification time and file identity are unchanged.
+        """
         path_key = str(source_path.resolve())
-        before = _file_signature(source_path.stat())
+        current = source_signature(source_path, kind)
         cached = self._verified_sources.get(path_key)
-        if cached is not None and cached[0] == before:
+        if cached is not None and cached[0] == current:
             return cached[1]
-        actual_hash = sha256_file(source_path)
-        after = _file_signature(source_path.stat())
-        if before != after:
-            raise OSError("A forrásfájl az ellenőrzés közben megváltozott.")
-        self._verified_sources[path_key] = (after, actual_hash)
-        return actual_hash
+        stored = database.verified_source(path_key)
+        if stored is not None and stored[1] == current:
+            self._verified_sources[path_key] = (current, stored[0])
+            return stored[0]
+        with self._lock:
+            hash_lock = self._hash_locks.setdefault(path_key, threading.Lock())
+        with hash_lock:
+            cached = self._verified_sources.get(path_key)
+            if cached is not None and cached[0] == source_signature(source_path, kind):
+                return cached[1]
+            logger.info("Verifying source SHA-256 before opening: %s", source_path)
+            actual_hash, signature = hash_source(source_path, kind)
+            logger.info("Source SHA-256 on open: %s %s", source_path, actual_hash)
+            self._verified_sources[path_key] = (signature, actual_hash)
+            return actual_hash
 
     def _require_case(self) -> IndexDatabase:
         """Return the selected database or report that case setup is required."""
@@ -802,7 +912,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             logger.exception("Unhandled local API request error: %s", self.path)
             self._send_error(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                "Belső hiba történt. Részletek a helyi alkalmazásnaplóban.",
+                _internal_error_message(),
             )
 
     def do_POST(self) -> None:
@@ -938,7 +1048,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             logger.exception("Unhandled local API request error: %s", self.path)
             self._send_error(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                "Belső hiba történt. Részletek a helyi alkalmazásnaplóban.",
+                _internal_error_message(),
             )
 
     def log_message(self, format_string: str, *args: object) -> None:
@@ -1146,6 +1256,7 @@ class _MailScopeHttpServer(ThreadingHTTPServer):
         """Wait for the active indexing checkpoint, then stop serving requests."""
         self.application.stop_indexing_safely()
         self.shutdown()
+        self.application.close()
 
 
 def create_server(
@@ -1267,15 +1378,24 @@ def _positive_integer(value: str) -> int:
     return parsed
 
 
-def _file_signature(file_stat: os.stat_result) -> tuple[int, int, int, int, int]:
-    """Build a local file identity from size and available change metadata."""
-    return (
-        int(file_stat.st_dev),
-        int(file_stat.st_ino),
-        int(file_stat.st_size),
-        int(file_stat.st_mtime_ns),
-        int(file_stat.st_ctime_ns),
-    )
+def _optional_path(path: Path | None) -> str | None:
+    """Expose an optional log path as JSON text."""
+    return None if path is None else str(path)
+
+
+def _locator_text(locator: MessageLocator) -> str:
+    """Describe where a message lives inside its source file."""
+    if locator.folder_path is not None and locator.item_index is not None:
+        return f"{locator.folder_path} #{locator.item_index}"
+    return f"bájt {locator.offset}, hossz {locator.length}"
+
+
+def _internal_error_message() -> str:
+    """Point the user to the log file that holds the full error details."""
+    log_path = application_log_path()
+    if log_path is None:
+        return "Belső hiba történt."
+    return f"Belső hiba történt. Részletek a naplófájlban: {log_path}"
 
 
 def _optional_date(value: str, label: str) -> date | None:

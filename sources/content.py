@@ -52,18 +52,24 @@ class _HtmlTextParser(HTMLParser):
         self, tag: str, _attrs: list[tuple[str, str | None]]
     ) -> None:
         """Track hidden elements and separate block-level text."""
-        is_hidden = any(
-            name.casefold() == "hidden" for name, _ in _attrs
-        ) and tag not in self._VOID_TAGS
-        if tag in self._IGNORED_TAGS or is_hidden:
+        if tag in self._VOID_TAGS:
+            if not self.ignored_tags and tag in self._BLOCK_TAGS:
+                self.fragments.append("\n")
+            return
+        is_hidden = any(name.casefold() == "hidden" for name, _ in _attrs)
+        if self.ignored_tags or tag in self._IGNORED_TAGS or is_hidden:
+            # Track every element opened inside hidden content, so that a
+            # nested close tag with the same name does not end hiding early.
             self.ignored_tags.append(tag)
-        elif not self.ignored_tags and tag in self._BLOCK_TAGS:
+        elif tag in self._BLOCK_TAGS:
             self.fragments.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         """Stop ignoring hidden content when its element closes."""
-        if tag in self._IGNORED_TAGS and tag in self.ignored_tags:
-            self.ignored_tags.remove(tag)
+        if tag in self.ignored_tags:
+            ignored_index = self.ignored_tags[::-1].index(tag)
+            ignored_index = len(self.ignored_tags) - ignored_index - 1
+            del self.ignored_tags[ignored_index:]
         elif not self.ignored_tags and tag in self._BLOCK_TAGS:
             self.fragments.append("\n")
 
@@ -74,24 +80,51 @@ class _HtmlTextParser(HTMLParser):
 
 
 def message_body_text(message: EmailMessage) -> str:
-    """Return searchable plain text from the preferred message body part."""
-    body_part = message.get_body(preferencelist=("plain", "html"))
-    if body_part is None:
-        return ""
+    """Return searchable plain text, using HTML when the plain part is empty."""
+    for preference in ("plain", "html"):
+        body_part = message.get_body(preferencelist=(preference,))
+        if body_part is None:
+            continue
+        try:
+            content = body_part.get_content()
+        except (LookupError, UnicodeError) as error:
+            raise ValueError(f"Unable to decode message body: {error}") from error
+        if not isinstance(content, str):
+            continue
+        if preference == "html":
+            content = html_to_text(content)
+        if content.strip():
+            return content
+    return ""
 
-    try:
-        content = body_part.get_content()
-    except (LookupError, UnicodeError) as error:
-        raise ValueError(f"Unable to decode message body: {error}") from error
-    if not isinstance(content, str):
-        return ""
-    if body_part.get_content_subtype().casefold() != "html":
-        return content
 
+def html_to_text(content: str) -> str:
+    """Convert HTML markup to its visible text."""
     parser = _HtmlTextParser()
     parser.feed(content)
     parser.close()
     return "".join(parser.fragments)
+
+
+def decode_text_bytes(data: bytes, charset: str = "") -> str:
+    """Decode mailbox text using BOMs, strict UTF-8, then a declared charset."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace").rstrip("\x00")
+    sample = data[:256]
+    if sample and sample.count(b"\x00") >= max(2, len(sample) // 6):
+        return data.decode("utf-16-le", errors="replace").rstrip("\x00")
+    try:
+        return data.decode("utf-8").rstrip("\x00")
+    except UnicodeDecodeError:
+        pass
+    for candidate in (charset, "cp1250"):
+        if not candidate:
+            continue
+        try:
+            return data.decode(candidate).rstrip("\x00")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode("latin-1").rstrip("\x00")
 
 
 def message_addresses(message: EmailMessage, header: str) -> tuple[str, ...]:

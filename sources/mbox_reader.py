@@ -4,6 +4,7 @@ __author__ = "Bálint Szabolcs"
 
 import csv
 import logging
+import re
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
@@ -19,6 +20,14 @@ from .content import (
 
 
 logger = logging.getLogger(__name__)
+_LOOSE_ENVELOPE = re.compile(
+    rb"^From \S+ +(?=.*\b\d{1,2}:\d{2})(?=.*\b\d{4}\b)"
+)
+_STRICT_ENVELOPE = re.compile(
+    rb"^From \S+ +(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),? +"
+    rb"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +"
+    rb"\d{1,2} +\d{1,2}:\d{2}(?::\d{2})?(?: +[+-]\d{4})? +\d{4}\s*$"
+)
 
 
 class MboxReader:
@@ -50,15 +59,17 @@ class MboxReader:
         for locator in self._message_ranges(after_locator):
             try:
                 message = self._parse_message(locator)
-                yield self._metadata(message, locator, folder_info.path)
-            except (OSError, ValueError) as error:
+                metadata = self._metadata(message, locator, folder_info.path)
+            except Exception as error:
+                # A malformed message must not stop the rest of the mailbox;
+                # the email package can raise IndexError and similar errors.
                 logger.warning(
                     "Unable to read MBOX message at byte %d in %s: %s",
                     locator.offset,
                     self.path,
                     error,
                 )
-                yield MessageMetadata(
+                metadata = MessageMetadata(
                     locator=locator,
                     folder=folder_info.path,
                     subject="",
@@ -71,12 +82,37 @@ class MboxReader:
                     in_reply_to=None,
                     references=None,
                     attachment_names=(),
-                    error=str(error),
+                    error=f"{type(error).__name__}: {error}",
                 )
+            yield metadata
 
     def open_message(self, locator: MessageLocator) -> EmailMessage:
         """Parse one message by its source-file byte range."""
         return self._parse_message(locator)
+
+    def open_message_bytes(self, locator: MessageLocator) -> bytes:
+        """Return source message bytes without the MBOX envelope line."""
+        return self._message_content(locator)
+
+    def close(self) -> None:
+        """MBOX reads use short-lived file handles; nothing stays open."""
+
+    def _message_content(self, locator: MessageLocator) -> bytes:
+        """Read one MBOX range and strip its envelope line."""
+        if locator.offset < 0 or locator.length <= 0:
+            raise ValueError("Invalid MBOX message locator")
+
+        with self.path.open("rb") as source:
+            source.seek(locator.offset)
+            raw = source.read(locator.length)
+
+        if len(raw) != locator.length:
+            raise ValueError("MBOX message range is truncated")
+
+        envelope, separator, content = raw.partition(b"\n")
+        if not separator or not envelope.startswith(b"From "):
+            raise ValueError("MBOX message range has no valid envelope line")
+        return content
 
     def open_attachment(self, locator: MessageLocator, index: int) -> Attachment:
         """Load one selected attachment without extracting it to disk."""
@@ -102,18 +138,26 @@ class MboxReader:
     def _message_ranges(
         self, after_locator: MessageLocator | None = None
     ) -> Iterator[MessageLocator]:
-        """Locate envelope lines and derive message byte ranges."""
+        """Locate validated envelope lines and derive message byte ranges."""
         starts: list[int] = []
         with self.path.open("rb") as source:
             if after_locator is not None:
                 source.seek(after_locator.offset + after_locator.length)
+            previous_blank = True
             while True:
                 offset = source.tell()
                 line = source.readline()
                 if not line:
                     break
                 if line.startswith(b"From "):
-                    starts.append(offset)
+                    candidate = line.rstrip(b"\r\n")
+                    if (
+                        not starts
+                        or (previous_blank and _LOOSE_ENVELOPE.match(candidate))
+                        or _STRICT_ENVELOPE.match(candidate)
+                    ):
+                        starts.append(offset)
+                previous_blank = line in (b"\n", b"\r\n")
 
             source_size = source.tell()
 
@@ -123,21 +167,9 @@ class MboxReader:
 
     def _parse_message(self, locator: MessageLocator) -> EmailMessage:
         """Read and parse one MBOX range, excluding its envelope line."""
-        if locator.offset < 0 or locator.length <= 0:
-            raise ValueError("Invalid MBOX message locator")
-
-        with self.path.open("rb") as source:
-            source.seek(locator.offset)
-            raw = source.read(locator.length)
-
-        if len(raw) != locator.length:
-            raise ValueError("MBOX message range is truncated")
-
-        envelope, separator, content = raw.partition(b"\n")
-        if not separator or not envelope.startswith(b"From "):
-            raise ValueError("MBOX message range has no valid envelope line")
-
-        return BytesParser(policy=policy.default).parsebytes(content)
+        return BytesParser(policy=policy.default).parsebytes(
+            self._message_content(locator)
+        )
 
     @staticmethod
     def _metadata(
