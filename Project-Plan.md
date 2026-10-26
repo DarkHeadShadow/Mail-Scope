@@ -62,11 +62,18 @@ Forrás lehet:
   - Új forrás hozzáadásakor csak azt indexeli.
 - **Duplikátum-összevonás:** azonos Message-ID (tartalék: normalizált fejlécek + törzs hash)
   egy levél, több forrás-előfordulással.
-- **Személyek:** több e-mail-cím egy személyhez rendelhető (kézzel összevonható, javaslattal
-  a megjelenő név alapján). Minden szűrés személyre megy, nem címre. PST/OST-ben az Exchange
-  (`/O=…/CN=…`) címeket SMTP-címre kell feloldani, ahol lehetséges.
-- A személyhez rendelés nem módosítja a forrásleveleket; a felismert megjelenőnevek csak
-  jóváhagyható javaslatokat adnak, az e-mail-címekhez pedig pontosan egy személy rendelhető.
+- **Személyek:** több e-mail-cím egy személyhez rendelhető. Minden szűrés személyre megy,
+  nem címre. PST/OST-ben az Exchange (`/O=…/CN=…`) címeket SMTP-címre kell feloldani, ahol
+  lehetséges.
+- A személyek **automatikusan** jönnek létre (a felhasználó 2026-10-26-i döntése): indexelés
+  után és ügy megnyitásakor minden még hozzá nem rendelt cím személyhez kerül; az azonos
+  (normalizált, leggyakoribb) megjelenő nevű címek egy „automatikus” személyhez. Az automatikus
+  személyek szerkeszthetők (átnevezés, összevonás, cím hozzáadása/áthelyezése, leválasztás,
+  eltávolítás, törlés); az első kézi módosítás után „kézi” személlyé válnak, és az automatika
+  többé nem nyúl hozzájuk. Eltávolított vagy törölt személyhez tartozó címet az automatika nem
+  rendel újra.
+- A személyhez rendelés nem módosítja a forrásleveleket, és az e-mail-címekhez pontosan egy
+  személy rendelhető.
 - **Szálak:** In-Reply-To / References alapján, tartalékként normalizált tárgy (Re:/Fw:/VS: le);
   PST/OST-ben a ConversationIndex is felhasználható.
 - `server/` – helyi webszerver (pl. FastAPI vagy a standard library), csak 127.0.0.1-en.

@@ -1,4 +1,4 @@
-"""Manual person and email-alias management for the case index."""
+"""Automatic and manual person and email-alias management for the case index."""
 
 __author__ = "Bálint Szabolcs"
 
@@ -15,6 +15,7 @@ class Person:
     id: int
     display_name: str
     addresses: tuple[str, ...]
+    origin: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -34,18 +35,30 @@ class PersonDirectory:
         self.database = database
 
     def create_person(
-        self, display_name: str, addresses: tuple[str, ...] = ()
+        self, display_name: str, addresses: tuple[str, ...] = (), *, move: bool = False
     ) -> Person:
         """Create a person with optional known email addresses."""
-        person_id = self.database.create_person(display_name, addresses)
+        person_id = self.database.create_person(display_name, addresses, move=move)
         return next(person for person in self.people() if person.id == person_id)
 
     def assign_address(
-        self, person_id: int, address: str, display_name: str = ""
+        self, person_id: int, address: str, display_name: str = "", *, move: bool = False
     ) -> Person:
-        """Add an address alias to an existing person."""
-        self.database.assign_address(person_id, address, display_name)
+        """Add an address alias to an existing person, optionally moving it."""
+        self.database.assign_address(person_id, address, display_name, move=move)
         return self._get_person(person_id)
+
+    def split_address(self, person_id: int, address: str) -> Person:
+        """Move one alias of a person into a new person of its own."""
+        return self._get_person(self.database.split_address(person_id, address))
+
+    def delete_person(self, person_id: int) -> None:
+        """Delete a person; automatic grouping will not reuse their addresses."""
+        self.database.delete_person(person_id)
+
+    def auto_assign(self) -> int:
+        """Group unassigned observed addresses into automatic people."""
+        return self.database.auto_assign_people()
 
     def remove_address(self, person_id: int, address: str) -> bool:
         """Remove an address alias while leaving indexed source participants intact."""
@@ -64,20 +77,21 @@ class PersonDirectory:
     def people(self) -> list[Person]:
         """List all people, collecting each assigned alias once."""
         rows = self.database.people()
-        people: dict[int, tuple[str, list[str]]] = {}
+        people: dict[int, tuple[str, str, list[str]]] = {}
         for row in rows:
             person_id = int(row["id"])
             if person_id not in people:
-                people[person_id] = (str(row["display_name"]), [])
+                people[person_id] = (str(row["display_name"]), str(row["origin"]), [])
             if row["address"] is not None:
-                people[person_id][1].append(str(row["address"]))
+                people[person_id][2].append(str(row["address"]))
         return [
             Person(
                 id=person_id,
                 display_name=display_name,
                 addresses=tuple(sorted(addresses)),
+                origin=origin,
             )
-            for person_id, (display_name, addresses) in people.items()
+            for person_id, (display_name, origin, addresses) in people.items()
         ]
 
     def suggestions(self) -> list[PersonSuggestion]:

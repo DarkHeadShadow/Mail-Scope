@@ -199,6 +199,7 @@ class IndexingService:
                     reader.close()
                 self.database.resolve_address_aliases()
                 self.database.split_unanchored_threads()
+                self.database.auto_assign_people()
 
                 logger.info("Hashing source after indexing: %s", source_path)
                 sha256_after, signature_after = hash_source(source.path, source.kind)

@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS saved_searches (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS ignored_addresses (
+    address TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS address_aliases (
     legacy_address TEXT PRIMARY KEY,
     smtp_address TEXT NOT NULL
@@ -304,6 +308,13 @@ class IndexDatabase:
                     row["name"]
                     for row in connection.execute("PRAGMA table_info(sources)")
                 }
+                people_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(people)")
+                }
+                if "origin" not in people_columns:
+                    connection.execute(
+                        "ALTER TABLE people ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'"
+                    )
                 for column in ("verified_signature", "verified_at", "last_check_result"):
                     if column not in source_columns:
                         connection.execute(f"ALTER TABLE sources ADD COLUMN {column} TEXT")
@@ -1693,15 +1704,16 @@ class IndexDatabase:
                 connection.execute(
                     """
                     SELECT participants.address,
-                           min(participants.display_name) AS display_name,
+                           max(participants.display_name) AS display_name,
                            person_addresses.person_id,
-                           people.display_name AS person_name
+                           people.display_name AS person_name,
+                           people.origin AS person_origin
                     FROM participants
                     LEFT JOIN person_addresses
                       ON person_addresses.address = participants.address
                     LEFT JOIN people ON people.id = person_addresses.person_id
                     GROUP BY participants.address, person_addresses.person_id,
-                             people.display_name
+                             people.display_name, people.origin
                     ORDER BY lower(coalesce(people.display_name,
                                             min(participants.display_name),
                                             participants.address)),
@@ -1820,39 +1832,57 @@ class IndexDatabase:
         return None if row is None else str(row["value"])
 
     def create_person(
-        self, display_name: str, addresses: tuple[str, ...] = ()
+        self,
+        display_name: str,
+        addresses: tuple[str, ...] = (),
+        *,
+        move: bool = False,
     ) -> int:
-        """Create a named person and optionally assign email aliases."""
+        """Create a hand-made person and assign email aliases.
+
+        With ``move=True`` addresses already assigned to another person are
+        moved to the new person instead of being refused.
+        """
         normalized_name = display_name.strip()
         if not normalized_name:
             raise ValueError("Person display name must not be empty")
         normalized_addresses = _normalize_addresses(addresses)
         with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
-                "INSERT INTO people(display_name) VALUES (?)",
+                "INSERT INTO people(display_name, origin) VALUES (?, 'manual')",
                 (normalized_name,),
             )
             person_id = int(cursor.lastrowid)
             for address in normalized_addresses:
+                self._release_address(connection, address, only_automatic=not move)
                 self._assign_address(
                     connection, person_id, address, normalized_name
                 )
             return person_id
 
     def assign_address(
-        self, person_id: int, address: str, display_name: str = ""
+        self,
+        person_id: int,
+        address: str,
+        display_name: str = "",
+        *,
+        move: bool = False,
     ) -> None:
-        """Assign one address to a person, refusing cross-person alias collisions."""
+        """Assign one address to a person; ``move`` takes it from another person."""
         normalized_address = _normalize_address(address)
         if not normalized_address:
             raise ValueError("Email address must not be empty")
         with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
+            self._release_address(
+                connection, normalized_address, keep=person_id, only_automatic=not move
+            )
             self._assign_address(
                 connection,
                 person_id,
                 normalized_address,
                 display_name.strip(),
             )
+            self._mark_manual(connection, person_id)
 
     @staticmethod
     def _assign_address(
@@ -1875,6 +1905,7 @@ class IndexDatabase:
                 f"Email address is already assigned to person "
                 f"{current['person_id']}: {address}"
             )
+        connection.execute("DELETE FROM ignored_addresses WHERE address = ?", (address,))
         connection.execute(
             """
             INSERT INTO person_addresses(address, person_id, display_name)
@@ -1887,15 +1918,110 @@ class IndexDatabase:
             (address, person_id, display_name or person["display_name"]),
         )
 
+    @staticmethod
+    def _release_address(
+        connection: sqlite3.Connection,
+        address: str,
+        *,
+        keep: int | None = None,
+        only_automatic: bool = False,
+    ) -> None:
+        """Detach an address from its current person; an emptied person is removed.
+
+        With ``only_automatic`` an address is only taken from an automatically
+        created person; one held by a hand-edited person stays and is refused.
+        """
+        current = connection.execute(
+            """
+            SELECT person_addresses.person_id, people.origin
+            FROM person_addresses JOIN people ON people.id = person_addresses.person_id
+            WHERE person_addresses.address = ?
+            """,
+            (address,),
+        ).fetchone()
+        if current is None or current["person_id"] == keep:
+            return
+        if only_automatic and current["origin"] != "auto":
+            return
+        previous = int(current["person_id"])
+        connection.execute("DELETE FROM person_addresses WHERE address = ?", (address,))
+        IndexDatabase._delete_if_empty(connection, previous)
+
+    @staticmethod
+    def _mark_manual(connection: sqlite3.Connection, person_id: int) -> None:
+        """A person edited by hand is never changed by automatic grouping again."""
+        connection.execute(
+            "UPDATE people SET origin = 'manual' WHERE id = ?", (person_id,)
+        )
+
+    @staticmethod
+    def _delete_if_empty(connection: sqlite3.Connection, person_id: int) -> None:
+        """Remove a person that no longer has any address."""
+        connection.execute(
+            """
+            DELETE FROM people WHERE id = ?
+              AND NOT EXISTS (SELECT 1 FROM person_addresses WHERE person_id = ?)
+            """,
+            (person_id, person_id),
+        )
+
     def remove_address(self, person_id: int, address: str) -> bool:
-        """Unassign an address from a person and report whether it existed."""
+        """Unassign an address and keep automatic grouping from re-adding it."""
         normalized_address = _normalize_address(address)
         with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
                 "DELETE FROM person_addresses WHERE person_id = ? AND address = ?",
                 (person_id, normalized_address),
             )
-        return cursor.rowcount > 0
+            removed = cursor.rowcount > 0
+            if removed:
+                connection.execute(
+                    "INSERT OR IGNORE INTO ignored_addresses(address) VALUES (?)",
+                    (normalized_address,),
+                )
+                self._mark_manual(connection, person_id)
+        return removed
+
+    def split_address(self, person_id: int, address: str) -> int:
+        """Move one address of a person into a new hand-made person of its own."""
+        normalized_address = _normalize_address(address)
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
+            row = connection.execute(
+                """
+                SELECT display_name FROM person_addresses
+                WHERE person_id = ? AND address = ?
+                """,
+                (person_id, normalized_address),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Az e-mail-cím nem ehhez a személyhez tartozik.")
+            name = _observed_name(connection, normalized_address) or normalized_address
+            connection.execute(
+                "DELETE FROM person_addresses WHERE address = ?", (normalized_address,)
+            )
+            cursor = connection.execute(
+                "INSERT INTO people(display_name, origin) VALUES (?, 'manual')", (name,)
+            )
+            new_id = int(cursor.lastrowid)
+            self._assign_address(connection, new_id, normalized_address, name)
+            self._mark_manual(connection, person_id)
+            self._delete_if_empty(connection, person_id)
+        return new_id
+
+    def delete_person(self, person_id: int) -> None:
+        """Delete a person; their addresses are not grouped automatically again."""
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
+            if connection.execute("SELECT 1 FROM people WHERE id = ?", (person_id,)).fetchone() is None:
+                raise ValueError(f"Person does not exist: {person_id}")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO ignored_addresses(address)
+                SELECT address FROM person_addresses WHERE person_id = ?
+                """,
+                (person_id,),
+            )
+            connection.execute("DELETE FROM person_addresses WHERE person_id = ?", (person_id,))
+            connection.execute("DELETE FROM people WHERE id = ?", (person_id,))
 
     def rename_person(self, person_id: int, display_name: str) -> None:
         """Change a person's canonical display name."""
@@ -1904,7 +2030,7 @@ class IndexDatabase:
             raise ValueError("Person display name must not be empty")
         with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
             cursor = connection.execute(
-                "UPDATE people SET display_name = ? WHERE id = ?",
+                "UPDATE people SET display_name = ?, origin = 'manual' WHERE id = ?",
                 (normalized_name, person_id),
             )
             if cursor.rowcount != 1:
@@ -1926,6 +2052,66 @@ class IndexDatabase:
                 (target_id, source_id),
             )
             connection.execute("DELETE FROM people WHERE id = ?", (source_id,))
+            self._mark_manual(connection, target_id)
+
+    def auto_assign_people(self) -> int:
+        """Group every unassigned, non-ignored observed address into people.
+
+        Addresses whose most frequent display name normalizes to the same
+        text become one person; an existing automatic person with that name
+        is extended. Hand-edited people and ignored addresses are left alone.
+        Returns the number of addresses assigned.
+        """
+        with self.connection(write=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT participants.address, participants.display_name,
+                       count(*) AS uses
+                FROM participants
+                LEFT JOIN person_addresses
+                  ON person_addresses.address = participants.address
+                LEFT JOIN ignored_addresses
+                  ON ignored_addresses.address = participants.address
+                WHERE person_addresses.address IS NULL
+                  AND ignored_addresses.address IS NULL
+                GROUP BY participants.address, participants.display_name
+                """
+            ).fetchall()
+            names: dict[str, tuple[int, str]] = {}
+            addresses: set[str] = set()
+            for row in rows:
+                address = str(row["address"])
+                addresses.add(address)
+                name = _clean_display_name(str(row["display_name"] or ""))
+                if name and (address not in names or int(row["uses"]) > names[address][0]):
+                    names[address] = (int(row["uses"]), name)
+            groups: dict[str, tuple[str, list[str]]] = {}
+            for address in sorted(addresses):
+                name = names.get(address, (0, ""))[1]
+                key = f"name:{name.casefold()}" if name else f"address:{address}"
+                groups.setdefault(key, (name or address, []))[1].append(address)
+            automatic = {
+                str(row["display_name"]).casefold(): int(row["id"])
+                for row in connection.execute(
+                    "SELECT id, display_name FROM people WHERE origin = 'auto'"
+                )
+            }
+            assigned = 0
+            for key, (display_name, members) in groups.items():
+                person_id = automatic.get(display_name.casefold()) if key.startswith("name:") else None
+                if person_id is None:
+                    cursor = connection.execute(
+                        "INSERT INTO people(display_name, origin) VALUES (?, 'auto')",
+                        (display_name,),
+                    )
+                    person_id = int(cursor.lastrowid)
+                    automatic[display_name.casefold()] = person_id
+                for address in members:
+                    self._assign_address(
+                        connection, person_id, address, names.get(address, (0, ""))[1]
+                    )
+                    assigned += 1
+        return assigned
 
     def people(self) -> list[sqlite3.Row]:
         """Return people with their assigned addresses and observed names."""
@@ -1933,7 +2119,7 @@ class IndexDatabase:
             return list(
                 connection.execute(
                     """
-                    SELECT people.id, people.display_name,
+                    SELECT people.id, people.display_name, people.origin,
                            person_addresses.address,
                            person_addresses.display_name AS address_display_name
                     FROM people
@@ -1999,6 +2185,29 @@ class IndexDatabase:
 def _utc_now() -> str:
     """Return the current UTC time as an ISO 8601 timestamp."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _clean_display_name(name: str) -> str:
+    """Normalize an observed display name; names that are addresses do not count."""
+    cleaned = " ".join(name.replace('"', " ").replace("'", " ").split())
+    if not cleaned or "@" in cleaned or cleaned.casefold().startswith("/o="):
+        return ""
+    return cleaned
+
+
+def _observed_name(connection: sqlite3.Connection, address: str) -> str:
+    """Return the most frequent usable display name observed for an address."""
+    for row in connection.execute(
+        """
+        SELECT display_name, count(*) AS uses FROM participants
+        WHERE address = ? GROUP BY display_name ORDER BY uses DESC
+        """,
+        (address,),
+    ):
+        name = _clean_display_name(str(row["display_name"] or ""))
+        if name:
+            return name
+    return ""
 
 
 def _normalize_address(address: str) -> str:

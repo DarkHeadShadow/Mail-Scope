@@ -189,16 +189,58 @@
             <div>
               <p class="eyebrow">05 / SZEMÉLYEK</p>
               <h2 id="people-panel-title" class="page-heading" tabindex="-1">Személyek és e-mail-aliasok</h2>
-              <p class="muted">A beszélgetésnézet személyeket, nem külön e-mail-címeket kapcsol össze.</p>
+              <p class="muted">A program indexelés után automatikusan személyekhez rendeli a címeket (az azonos megjelenő nevűeket egy személyhez). Az automatikus személyeket szerkesztheti; a kézzel módosítottakhoz az automatika többé nem nyúl.</p>
             </div>
+            <button id="people-auto-button" class="button secondary" type="button">Automatikus csoportosítás most</button>
           </div>
           <div class="people-layout">
-            <div>
-              <h3>Ismert személyek</h3>
+            <div class="people-browser">
+              <div class="list-heading">
+                <h3>Személyek <span id="people-count" class="muted"></span></h3>
+              </div>
+              <label class="field">
+                <span>Szűrés név vagy e-mail-cím szerint</span>
+                <input id="people-filter" type="search" placeholder="Például: anna vagy pelda.hu">
+              </label>
               <div id="people-list" class="people-list empty-state">Nyisson meg egy indexelt ügyet.</div>
             </div>
+            <div class="people-side">
+            <section id="person-editor" class="person-editor" aria-labelledby="person-editor-title">
+              <h3 id="person-editor-title">Személy szerkesztése</h3>
+              <p id="person-editor-empty" class="muted">Válasszon személyt a listából.</p>
+              <div id="person-editor-body" hidden>
+                <div class="person-editor-row">
+                  <label class="field grow">
+                    <span>Név <span id="person-origin" class="origin-badge"></span></span>
+                    <input id="person-edit-name" type="text" maxlength="200">
+                  </label>
+                  <button id="person-rename-button" class="button secondary" type="button">Átnevezés</button>
+                </div>
+                <div class="field">
+                  <span>E-mail-címek (aliasok)</span>
+                  <div id="person-edit-addresses" class="person-address-list"></div>
+                </div>
+                <div class="person-editor-row">
+                  <label class="field grow">
+                    <span>Cím hozzáadása (más személytől áthelyezi)</span>
+                    <input id="person-add-address" type="text" list="person-address-options" placeholder="Kezdje el gépelni a címet">
+                    <datalist id="person-address-options"></datalist>
+                  </label>
+                  <button id="person-add-button" class="button secondary" type="button">Hozzáadás</button>
+                </div>
+                <div class="person-editor-row">
+                  <label class="field grow">
+                    <span>Másik személy beolvasztása ebbe</span>
+                    <input id="person-merge-source" type="text" list="person-merge-options" placeholder="Kezdje el gépelni a nevet">
+                    <datalist id="person-merge-options"></datalist>
+                  </label>
+                  <button id="person-merge-button" class="button secondary" type="button">Összevonás</button>
+                </div>
+                <button id="person-delete-button" class="button danger" type="button">Személy törlése</button>
+              </div>
+            </section>
             <form id="person-form" class="person-form">
-              <h3>Új személy összerendelése</h3>
+              <h3>Új személy kézzel</h3>
               <label class="field">
                 <span>Személy neve</span>
                 <input id="person-name" type="text" placeholder="Például: Teszt Antal" required>
@@ -209,6 +251,7 @@
               </div>
               <button class="button secondary" type="submit">Személy és aliasok mentése</button>
             </form>
+            </div>
           </div>
           <p id="people-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
@@ -228,6 +271,10 @@
           <div class="conversation-controls">
             <fieldset class="person-selector">
               <legend>Résztvevők</legend>
+              <label class="field conversation-people-filter">
+                <span>Személy keresése</span>
+                <input id="conversation-people-filter" type="search" placeholder="Név vagy e-mail-cím">
+              </label>
               <div id="conversation-people" class="conversation-people empty-state">Előbb hozzon létre vagy rendeljen hozzá személyeket.</div>
             </fieldset>
             <div class="conversation-filter-grid">

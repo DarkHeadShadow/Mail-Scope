@@ -470,15 +470,12 @@ class IndexerTests(unittest.TestCase):
         self.service.index_sources(discover_sources(mailbox))
         directory = PersonDirectory(self.database)
 
-        suggestions = directory.suggestions()
-
-        self.assertTrue(
-            any(
-                suggestion.display_name == "Teszt Antal"
-                and suggestion.addresses
-                == ("antal.masik@pelda.hu", "antal@pelda.hu")
-                for suggestion in suggestions
-            )
+        # Indexing grouped the two addresses sharing a display name automatically.
+        automatic = {person.display_name: person for person in directory.people()}
+        self.assertEqual(automatic["Teszt Antal"].origin, "auto")
+        self.assertEqual(
+            automatic["Teszt Antal"].addresses,
+            ("antal.masik@pelda.hu", "antal@pelda.hu"),
         )
         person = directory.create_person(
             "Bálint Antal", ("ANTAL@PELDA.HU", "antal.masik@pelda.hu")
@@ -518,7 +515,11 @@ class IndexerTests(unittest.TestCase):
             len(directory.search("Kereshető", (person.id,), include_cc_bcc=True)),
             3,
         )
-        self.assertEqual(len(directory.people()), 1)
+        # One hand-made person remains; the recipient got an automatic person.
+        self.assertEqual(
+            sorted((p.display_name, p.origin) for p in directory.people()),
+            [("Antal Teszt", "manual"), ("Teszt Anna", "auto")],
+        )
 
     def test_groups_reply_chains_by_reference_and_normalized_subject(self) -> None:
         """Use message references first and normalized subjects as fallback."""
@@ -913,6 +914,58 @@ class IndexerTests(unittest.TestCase):
                 )
             }
         self.assertEqual(senders, {"antal@pelda.hu"})
+
+    def test_automatic_people_are_editable_and_respect_manual_edits(self) -> None:
+        """Group by display name, keep hand edits, and never re-add removed aliases."""
+        mailbox = self.case_directory / "auto-people.mbox"
+        mailbox.write_bytes(
+            # The fixture names every To address "Teszt Anna", so all mails go to Anna.
+            _mail(message_id="<a1@example.test>", subject="A1", body="x", from_address="anna@pelda.hu",
+                  from_display_name="Teszt Anna", to_address="anna@pelda.hu")
+            + _mail(message_id="<a2@example.test>", subject="A2", body="x", from_address="anna.magan@pelda.hu",
+                    from_display_name='"Teszt  Anna"', to_address="anna@pelda.hu")
+            + _mail(message_id="<a3@example.test>", subject="A3", body="x", from_address="noname@pelda.hu",
+                    from_display_name="", to_address="anna@pelda.hu")
+        )
+        self.service.index_sources(discover_sources(mailbox))
+        directory = PersonDirectory(self.database)
+
+        def by_name() -> dict[str, object]:
+            return {person.display_name: person for person in directory.people()}
+
+        people = by_name()
+        self.assertEqual(people["Teszt Anna"].addresses, ("anna.magan@pelda.hu", "anna@pelda.hu"))
+        self.assertEqual(people["Teszt Anna"].origin, "auto")
+        self.assertEqual(people["noname@pelda.hu"].addresses, ("noname@pelda.hu",))
+
+        anna = people["Teszt Anna"]
+        split = directory.split_address(anna.id, "anna.magan@pelda.hu")
+        self.assertEqual(split.addresses, ("anna.magan@pelda.hu",))
+        self.assertEqual(split.origin, "manual")
+        anna = by_name()["Teszt Anna"]
+        self.assertEqual(anna.origin, "manual")
+        self.assertEqual(anna.addresses, ("anna@pelda.hu",))
+
+        noname = by_name()["noname@pelda.hu"]
+        self.assertTrue(directory.remove_address(noname.id, "noname@pelda.hu"))
+        directory.auto_assign()
+        self.assertFalse(any("noname@pelda.hu" in p.addresses for p in directory.people()))
+
+        renamed = directory.rename(split.id, "Anna magáncím")
+        merged = directory.merge(anna.id, renamed.id)
+        self.assertEqual(merged.addresses, ("anna.magan@pelda.hu", "anna@pelda.hu"))
+        directory.delete_person(merged.id)
+        directory.auto_assign()
+        self.assertFalse(any("anna@pelda.hu" in p.addresses for p in directory.people()))
+
+        moved_to = directory.create_person("Kézi Anna", ())
+        directory.assign_address(moved_to.id, "anna@pelda.hu")
+        holder = directory.create_person("Másik", ())
+        with self.assertRaises(ValueError):
+            directory.assign_address(holder.id, "anna@pelda.hu")
+        moved = directory.assign_address(holder.id, "anna@pelda.hu", move=True)
+        self.assertIn("anna@pelda.hu", moved.addresses)
+        self.assertNotIn("Kézi Anna", by_name())
 
     def test_migrates_existing_participant_table(self) -> None:
         """Upgrade a prior schema by adding display-name storage safely."""

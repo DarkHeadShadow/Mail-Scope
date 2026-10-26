@@ -72,10 +72,12 @@ The executable opens the local UI in the default browser automatically and runs 
 
 ## Use
 
+A complete step-by-step user guide is available in Hungarian: [Használati útmutató](./docs/HASZNALATI_UTMUTATO.md).
+
 1. Start Mail-Scope. Without an open case, the welcome screen appears: create a case, open an existing case folder, or pick one of the recent cases (kept in `%APPDATA%\Mail-Scope\recent.json`, never in a case or source folder).
 2. On the **Ügy és források** page, enter a source file or folder and review the discovered sources.
 3. Start indexing. A small indicator next to “01” in the sidebar shows running indexing on every page.
-4. Use the pages of the workspace: **Archívum böngésző**, **Beszélgetésnézet**, **Részletes keresés**, and **Személyek** (create people and aliases for conversation analysis).
+4. Use the pages of the workspace: **Archívum böngésző**, **Beszélgetésnézet**, **Részletes keresés**, and **Személyek**. People are created automatically after indexing (addresses with the same display name become one person); review and edit them on the **Személyek** page.
 5. Export only the results you need. CSV exports are limited to 10,000 results, EML ZIP exports to 500 messages and 256 MiB of exported message data, and printable PDF reports to 2,000 results.
 
 Each page has its own address (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), so Back/Forward and reload keep the current page; `Ctrl+1`…`Ctrl+5` switch pages outside input fields. Switching pages keeps filters, the selected message, the loaded conversation, and search conditions. On narrow screens the sidebar becomes a horizontal, scrollable tab bar. The welcome screen's circuit-board animation stops when the window is hidden, when a case is opened, and entirely when Windows “Show animations” is turned off (reduced motion).
@@ -111,6 +113,10 @@ Case sources with the last full check and the **Teljes újraellenőrzés** butto
 Archive browser with an opened message and its forensic data:
 
 ![Mail-Scope archive browser with synthetic messages](./docs/screenshots/archive.png)
+
+People page with automatic grouping and the person editor:
+
+![Mail-Scope people page with automatic and edited people](./docs/screenshots/people.png)
 
 Conversation view of two people:
 

@@ -10,7 +10,9 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
+import sys
 import threading
 import zipfile
 from dataclasses import asdict
@@ -86,8 +88,13 @@ def _browse_local_path(kind: str, initial_path: str) -> str:
 
     root = Tk()
     root.withdraw()
+    # The dialog is started by the browser, which keeps the foreground; a
+    # topmost owner window brings the picker in front instead of behind it.
+    root.attributes("-topmost", True)
     try:
         root.update()
+        root.lift()
+        root.focus_force()
         if kind == "directory":
             return filedialog.askdirectory(
                 parent=root,
@@ -155,6 +162,12 @@ class MailScopeApplication:
             self.database = IndexDatabase.for_case(case_path)
             self.case_log = attach_case_log(case_path)
             logger.info("Case opened: %s", case_path)
+            try:
+                assigned = PersonDirectory(self.database).auto_assign()
+                if assigned:
+                    logger.info("Automatically assigned %d addresses to people", assigned)
+            except DatabaseBusyError:
+                logger.warning("Automatic person grouping skipped: database busy")
             self.indexing_service = IndexingService(self.database)
             self._discovered.clear()
             self._verified_sources.clear()
@@ -632,6 +645,38 @@ class MailScopeApplication:
             database = self._require_case()
             person = PersonDirectory(database).create_person(display_name, addresses)
             return asdict(person)
+
+    def edit_person(self, action: str, person_id: int | None, payload: dict[str, Any]) -> dict[str, Any]:
+        """Apply one person edit from the Személyek page and return the new list."""
+        with self._lock:
+            database = self._require_case()
+            directory = PersonDirectory(database)
+            if action == "auto":
+                assigned = directory.auto_assign()
+                logger.info("Automatic person grouping assigned %d addresses", assigned)
+            elif person_id is None:
+                raise ValueError("Hiányzó személyazonosító.")
+            elif action == "rename":
+                directory.rename(person_id, _required_string(payload, "display_name"))
+            elif action == "merge":
+                source_id = payload.get("source_id")
+                if not isinstance(source_id, int) or isinstance(source_id, bool):
+                    raise ValueError("A source_id egész szám legyen.")
+                directory.merge(person_id, source_id)
+            elif action == "addresses":
+                directory.assign_address(person_id, _required_string(payload, "address"), move=True)
+            elif action == "remove-address":
+                if not directory.remove_address(person_id, _required_string(payload, "address")):
+                    raise ApiError(HTTPStatus.NOT_FOUND, "Ez a cím nem ehhez a személyhez tartozik.")
+            elif action == "split":
+                directory.split_address(person_id, _required_string(payload, "address"))
+            elif action == "delete":
+                directory.delete_person(person_id)
+            else:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Ismeretlen személyművelet.")
+            if action != "auto":
+                logger.info("Person %s edited: %s", person_id, action)
+        return self.people()
 
     def conversation(
         self,
@@ -1270,6 +1315,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.start_index(paths)
             elif path == "/api/index/cancel":
                 response = self.server.application.cancel_index()
+            elif path == "/api/people/auto":
+                response = self.server.application.edit_person("auto", None, payload)
+            elif re.fullmatch(r"/api/people/\d+/(rename|merge|addresses|remove-address|split|delete)", path):
+                _, _, _, raw_id, action = path.split("/")
+                response = self.server.application.edit_person(
+                    action, _positive_integer(raw_id), payload
+                )
             elif path == "/api/settings/verification":
                 response = self.server.application.set_verification_mode(
                     _required_string(payload, "mode")
@@ -1477,7 +1529,16 @@ class _MailScopeHttpServer(ThreadingHTTPServer):
     """Bind one application instance to a loopback-only HTTP listener."""
 
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR lets a second process bind the same port without
+    # an error, so an old instance could keep answering. Bind exclusively there.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self) -> None:
+        """Refuse to share the port with another running Mail-Scope instance."""
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        super().server_bind()
 
     def __init__(self, server_address: tuple[str, int], application: MailScopeApplication) -> None:
         """Keep the application context available to each request handler."""

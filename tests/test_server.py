@@ -264,6 +264,38 @@ class ServerTests(unittest.TestCase):
             "match",
         )
 
+    def test_people_are_created_automatically_and_edited_over_http(self) -> None:
+        """Index, find automatic people, and rename one through the POST route."""
+        self._index_fixture_source()
+        people = self.application.people()["people"]
+        self.assertTrue(people)
+        self.assertTrue(all(person["origin"] == "auto" for person in people))
+        target = people[0]
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+        connection.request(
+            "POST",
+            f"/api/people/{target['id']}/rename",
+            body=json.dumps({"display_name": "Átnevezett Személy"}),
+            headers=headers,
+        )
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        renamed = next(p for p in json.loads(response.read())["people"] if p["id"] == target["id"])
+        self.assertEqual((renamed["display_name"], renamed["origin"]), ("Átnevezett Személy", "manual"))
+        connection.request("POST", "/api/people/999999/delete", body="{}", headers=headers)
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 400)
+
     def test_full_reverification_http_route(self) -> None:
         """Start a full check through the same-origin POST route."""
         source_id = self._index_fixture_source()
@@ -339,6 +371,15 @@ class ServerTests(unittest.TestCase):
         job.cancel.assert_called_once_with()
         self.assertEqual(job.wait.call_args_list[0].args, (0,))
         self.assertEqual(job.wait.call_args_list[1].args, ())
+
+    def test_second_instance_cannot_share_the_port(self) -> None:
+        """A second server on the same port fails instead of silently co-listening."""
+        first = create_server(self.application, port=0)
+        self.addCleanup(first.server_close)
+        port = int(first.server_address[1])
+        with self.assertRaises(OSError):
+            second = create_server(MailScopeApplication(), port=port)
+            second.server_close()
 
     def test_binds_only_to_loopback(self) -> None:
         """Reject attempts to expose this local mailbox API on a network interface."""

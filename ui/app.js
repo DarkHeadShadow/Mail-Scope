@@ -1040,47 +1040,200 @@ async function refreshPeople() {
 }
 
 /**
- * Render person checkboxes and still-unassigned indexed addresses.
+ * Render the people list, the person editor, conversation choices and addresses.
  */
 function renderPeople(observedAddresses) {
-  const peopleList = element("people-list");
+  state.observedAddresses = observedAddresses;
+  if (!state.people.some((person) => person.id === state.selectedPersonId)) {
+    state.selectedPersonId = null;
+  }
+  renderPeopleList();
+  renderPersonEditor();
+  renderConversationPeople();
+  renderObservedAddresses();
+}
+
+/**
+ * True when a person's name or any of their addresses contains the filter text.
+ */
+function personMatches(person, filter) {
+  if (!filter) return true;
+  const needle = filter.toLocaleLowerCase();
+  return person.display_name.toLocaleLowerCase().includes(needle)
+    || person.addresses.some((address) => address.includes(needle));
+}
+
+/**
+ * List people as compact, selectable rows filtered by name or address.
+ */
+function renderPeopleList() {
+  const list = element("people-list");
+  list.replaceChildren();
+  const filter = element("people-filter").value.trim();
+  const visible = state.people.filter((person) => personMatches(person, filter));
+  const automatic = state.people.filter((person) => person.origin === "auto").length;
+  element("people-count").textContent =
+    `· ${state.people.length.toLocaleString("hu-HU")} (${automatic.toLocaleString("hu-HU")} automatikus)`;
+  if (visible.length === 0) {
+    list.className = "people-list empty-state";
+    list.textContent = state.people.length
+      ? "Nincs a szűrésnek megfelelő személy."
+      : "Még nincs személy. Indexelés után a címek automatikusan személyekhez kerülnek.";
+    return;
+  }
+  list.className = "people-list";
+  visible.slice(0, 500).forEach((person) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "person-row";
+    row.classList.toggle("selected", person.id === state.selectedPersonId);
+    row.setAttribute("aria-pressed", String(person.id === state.selectedPersonId));
+    const name = document.createElement("strong");
+    name.textContent = person.display_name;
+    const badge = document.createElement("span");
+    badge.className = `origin-badge ${person.origin}`;
+    badge.textContent = person.origin === "auto" ? "automatikus" : "kézi";
+    const addresses = document.createElement("small");
+    addresses.textContent = person.addresses.join(", ") || "Nincs hozzárendelt e-mail-cím";
+    row.append(name, badge, addresses);
+    row.addEventListener("click", () => {
+      state.selectedPersonId = person.id;
+      renderPeopleList();
+      renderPersonEditor();
+    });
+    list.append(row);
+  });
+  if (visible.length > 500) {
+    const more = document.createElement("p");
+    more.className = "muted";
+    more.textContent = `További ${visible.length - 500} személy – szűkítse a szűrést.`;
+    list.append(more);
+  }
+}
+
+/**
+ * Show the editor of the selected person with all alias and merge actions.
+ */
+function renderPersonEditor() {
+  const person = state.people.find((item) => item.id === state.selectedPersonId);
+  element("person-editor-empty").hidden = Boolean(person);
+  element("person-editor-body").hidden = !person;
+  if (!person) return;
+  element("person-edit-name").value = person.display_name;
+  const badge = element("person-origin");
+  badge.className = `origin-badge ${person.origin}`;
+  badge.textContent = person.origin === "auto" ? "automatikus" : "kézi";
+
+  const addressList = element("person-edit-addresses");
+  addressList.replaceChildren();
+  person.addresses.forEach((address) => {
+    const row = document.createElement("div");
+    row.className = "person-address";
+    const text = document.createElement("span");
+    text.textContent = address;
+    const split = document.createElement("button");
+    split.type = "button";
+    split.className = "button quiet";
+    split.textContent = "Leválasztás új személybe";
+    split.disabled = person.addresses.length < 2;
+    split.addEventListener("click", () => editPerson(person.id, "split", { address }, "A cím új személybe került."));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button quiet";
+    remove.textContent = "Eltávolítás";
+    remove.title = "A cím személy nélkül marad, és az automatika sem rendeli újra.";
+    remove.addEventListener("click", () => editPerson(person.id, "remove-address", { address }, "A cím eltávolítva."));
+    row.append(text, split, remove);
+    addressList.append(row);
+  });
+
+  const addressOptions = element("person-address-options");
+  addressOptions.replaceChildren();
+  state.observedAddresses
+    .filter((item) => !person.addresses.includes(item.address))
+    .forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.address;
+      option.label = item.person_name ? `jelenleg: ${item.person_name}` : (item.display_name || "személy nélkül");
+      addressOptions.append(option);
+    });
+  const mergeOptions = element("person-merge-options");
+  mergeOptions.replaceChildren();
+  state.people
+    .filter((item) => item.id !== person.id)
+    .forEach((item) => {
+      const option = document.createElement("option");
+      option.value = `${item.display_name} (#${item.id})`;
+      option.label = item.addresses.join(", ");
+      mergeOptions.append(option);
+    });
+}
+
+/**
+ * Send one person edit to the server and refresh people everywhere.
+ */
+async function editPerson(personId, action, payload, successMessage) {
+  const notice = element("people-notice");
+  try {
+    const path = personId === null ? "/api/people/auto" : `/api/people/${personId}/${action}`;
+    const result = await requestJson(path, { method: "POST", body: JSON.stringify(payload) });
+    state.people = result.people;
+    renderPeople(result.observed_addresses);
+    notice.textContent = successMessage;
+    notice.classList.remove("error");
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.classList.add("error");
+  }
+}
+
+/**
+ * Offer people as conversation participants, keeping earlier choices.
+ */
+function renderConversationPeople() {
   const conversationPeople = element("conversation-people");
-  peopleList.replaceChildren();
+  const checked = new Set(
+    [...conversationPeople.querySelectorAll("input:checked")].map((checkbox) => checkbox.value),
+  );
   conversationPeople.replaceChildren();
   if (state.people.length === 0) {
-    peopleList.className = "people-list empty-state";
-    peopleList.textContent = "Még nincs személy. Hozzon létre személyt az indexelt címekből.";
     conversationPeople.className = "conversation-people empty-state";
-    conversationPeople.textContent = "A beszélgetéshez előbb legalább két személyt rendeljen hozzá.";
-  } else {
-    peopleList.className = "people-list";
-    conversationPeople.className = "conversation-people";
-    state.people.forEach((person) => {
-      const label = document.createElement("label");
-      label.className = "person-row";
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.value = String(person.id);
-      checkbox.dataset.personName = person.display_name;
-      const details = document.createElement("span");
-      const name = document.createElement("strong");
-      name.textContent = person.display_name;
-      const addresses = document.createElement("small");
-      addresses.textContent = person.addresses.length
-        ? person.addresses.join(", ")
-        : "Nincs hozzárendelt e-mail-cím";
-      details.append(name, addresses);
-      label.append(checkbox, details);
-      peopleList.append(label);
-
-      const conversationLabel = document.createElement("label");
-      conversationLabel.className = "conversation-person";
-      const conversationCheckbox = checkbox.cloneNode();
-      conversationLabel.append(conversationCheckbox, document.createTextNode(person.display_name));
-      conversationPeople.append(conversationLabel);
-    });
+    conversationPeople.textContent = "A beszélgetéshez legalább két személy kell; indexelés után automatikusan létrejönnek.";
+    return;
   }
+  conversationPeople.className = "conversation-people";
+  state.people.forEach((person) => {
+    const label = document.createElement("label");
+    label.className = "conversation-person";
+    label.dataset.search = `${person.display_name} ${person.addresses.join(" ")}`.toLocaleLowerCase();
+    label.title = person.addresses.join(", ");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = String(person.id);
+    checkbox.dataset.personName = person.display_name;
+    checkbox.checked = checked.has(checkbox.value);
+    label.append(checkbox, document.createTextNode(person.display_name));
+    conversationPeople.append(label);
+  });
+  filterConversationPeople();
+}
 
+/**
+ * Hide conversation participants that do not match the filter; checked ones stay.
+ */
+function filterConversationPeople() {
+  const needle = element("conversation-people-filter").value.trim().toLocaleLowerCase();
+  element("conversation-people").querySelectorAll(".conversation-person").forEach((label) => {
+    const checked = label.querySelector("input").checked;
+    label.hidden = Boolean(needle) && !checked && !label.dataset.search.includes(needle);
+  });
+}
+
+/**
+ * List observed addresses for a hand-made person; automatic ones can be taken over.
+ */
+function renderObservedAddresses() {
+  const observedAddresses = state.observedAddresses || [];
   const addressList = element("observed-addresses");
   addressList.replaceChildren();
   if (observedAddresses.length === 0) {
@@ -1095,13 +1248,14 @@ function renderPeople(observedAddresses) {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = address.address;
-    checkbox.disabled = address.person_id !== null;
+    // Addresses of automatic people can be taken over; hand-made ones stay.
+    checkbox.disabled = address.person_id !== null && address.person_origin !== "auto";
     const details = document.createElement("span");
     details.append(document.createTextNode(address.address));
     if (address.person_name || address.display_name) {
       const note = document.createElement("small");
       note.textContent = address.person_name
-        ? `Hozzárendelve: ${address.person_name}`
+        ? `${address.person_origin === "auto" ? "Automatikusan" : "Kézzel"}: ${address.person_name}`
         : `Megjelenő név: ${address.display_name}`;
       details.append(note);
     }
@@ -1109,6 +1263,41 @@ function renderPeople(observedAddresses) {
     addressList.append(label);
   });
 }
+
+element("people-filter").addEventListener("input", renderPeopleList);
+element("conversation-people-filter").addEventListener("input", filterConversationPeople);
+element("people-auto-button").addEventListener("click", () => {
+  editPerson(null, "auto", {}, "Az automatikus csoportosítás lefutott.");
+});
+element("person-rename-button").addEventListener("click", () => {
+  editPerson(state.selectedPersonId, "rename", { display_name: element("person-edit-name").value.trim() }, "Átnevezve.");
+});
+element("person-edit-name").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") element("person-rename-button").click();
+});
+element("person-add-button").addEventListener("click", () => {
+  const address = element("person-add-address").value.trim().toLocaleLowerCase();
+  if (!address) return;
+  element("person-add-address").value = "";
+  editPerson(state.selectedPersonId, "addresses", { address }, "A cím hozzáadva.");
+});
+element("person-merge-button").addEventListener("click", () => {
+  const match = element("person-merge-source").value.match(/#(\d+)\)\s*$/);
+  if (!match) {
+    element("people-notice").textContent = "Válassza ki a beolvasztandó személyt a listából.";
+    element("people-notice").classList.add("error");
+    return;
+  }
+  element("person-merge-source").value = "";
+  editPerson(state.selectedPersonId, "merge", { source_id: Number(match[1]) }, "A két személy összevonva.");
+});
+element("person-delete-button").addEventListener("click", () => {
+  const person = state.people.find((item) => item.id === state.selectedPersonId);
+  if (!person || !window.confirm(`Törli a(z) „${person.display_name}” személyt? A címei személy nélkül maradnak, és az automatika sem rendeli őket újra.`)) {
+    return;
+  }
+  editPerson(person.id, "delete", {}, "A személy törölve.");
+});
 
 /**
  * Collect current archive filters and fetch one page of indexed occurrences.

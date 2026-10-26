@@ -72,10 +72,12 @@ Az `.exe` indításakor a program automatikusan megnyitja a helyi felületet az 
 
 ## Használat
 
+A teljes, lépésenkénti leírás: [Használati útmutató](./docs/HASZNALATI_UTMUTATO.md).
+
 1. Indítsa el a Mail-Scope-ot. Megnyitott ügy nélkül a nyitóképernyő jelenik meg: hozzon létre új ügyet, nyisson meg egy meglévő ügymappát, vagy válasszon a legutóbbi ügyek közül (ezek a `%APPDATA%\Mail-Scope\recent.json` fájlban tárolódnak, soha nem az ügy- vagy forrásmappában).
 2. Az **Ügy és források** lapon adjon meg forrásfájlt vagy mappát, és ellenőrizze a felismert forrásokat.
 3. Indítsa el az indexelést. Az oldalsávon a „01” melletti kis jelző bármelyik lapon mutatja, hogy indexelés fut.
-4. Használja a munkaterület lapjait: **Archívum böngésző**, **Beszélgetésnézet**, **Részletes keresés** és **Személyek** (itt hozhat létre személyeket és aliasokat a beszélgetésekhez).
+4. Használja a munkaterület lapjait: **Archívum böngésző**, **Beszélgetésnézet**, **Részletes keresés** és **Személyek**. A személyek indexelés után automatikusan létrejönnek (az azonos megjelenő nevű címek egy személyhez kerülnek); a **Személyek** lapon átnézheti és szerkesztheti őket.
 5. Csak a szükséges eredményeket exportálja. A CSV legfeljebb 10 000, az EML ZIP legfeljebb 500 levelet és 256 MiB exportált levéladatot, a nyomtatható PDF-jelentés legfeljebb 2000 találatot tartalmazhat.
 
 Minden lapnak saját címe van (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), így a Vissza/Előre gomb és a frissítés is az aktuális lapon marad; beviteli mezőn kívül a `Ctrl+1`…`Ctrl+5` vált lapot. Lapváltáskor megmaradnak a szűrők, a kijelölt levél, a betöltött beszélgetés és a keresési feltételek. Keskeny képernyőn az oldalsáv vízszintes, görgethető lapsávvá alakul. A nyitóképernyő áramköri animációja megáll, ha az ablak rejtett vagy ügy nyílik meg, és egyáltalán nem fut, ha a Windows „Animációk megjelenítése” beállítása ki van kapcsolva (csökkentett mozgás).
@@ -111,6 +113,10 @@ Az ügy forrásai az utolsó teljes ellenőrzéssel és a **Teljes újraellenőr
 Archívum böngésző megnyitott levéllel és forenzikus adatokkal:
 
 ![Mail-Scope archívum böngésző kitalált levelekkel](./docs/screenshots/archive.png)
+
+Személyek lap az automatikus csoportosítással és a szerkesztővel:
+
+![Mail-Scope személyek lap automatikus és szerkesztett személyekkel](./docs/screenshots/people.png)
 
 Két személy beszélgetésnézete:
 
