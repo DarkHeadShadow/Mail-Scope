@@ -16,9 +16,205 @@ const state = {
   detailedResults: [],
   detailedTotal: 0,
   detailedOffset: 0,
+  caseOpen: false,
+  route: null,
 };
 
 const element = (id) => document.getElementById(id);
+
+/** Workspace pages, in sidebar and Ctrl+1…5 order. */
+const ROUTES = {
+  ugy: { panel: "case-panel", title: "Ügy és források" },
+  archivum: { panel: "archive-panel", title: "Archívum böngésző" },
+  beszelgetes: { panel: "conversation-panel", title: "Beszélgetésnézet" },
+  kereses: { panel: "detailed-search-panel", title: "Részletes keresés" },
+  szemelyek: { panel: "people-panel", title: "Személyek" },
+};
+const ROUTE_ORDER = Object.keys(ROUTES);
+
+/**
+ * Read the page name from a "#/name" hash, falling back to the case page.
+ */
+function currentRoute() {
+  const match = window.location.hash.match(/^#\/([a-z]+)$/);
+  return match && ROUTES[match[1]] ? match[1] : "ugy";
+}
+
+/**
+ * Switch to a workspace page through the URL, so Back/Forward and reload work.
+ */
+function navigate(route) {
+  const hash = `#/${route}`;
+  if (window.location.hash === hash) {
+    showRoute();
+  } else {
+    window.location.hash = hash;
+  }
+}
+
+/**
+ * Show exactly one page; without an open case only the case page is reachable.
+ */
+function showRoute() {
+  let route = currentRoute();
+  if (!state.caseOpen && route !== "ugy") route = "ugy";
+  if (window.location.hash !== `#/${route}`) {
+    window.history.replaceState(null, "", `#/${route}`);
+  }
+  ROUTE_ORDER.forEach((name) => {
+    element(ROUTES[name].panel).hidden = name !== route;
+  });
+  document.querySelectorAll(".side-link[data-route]").forEach((link) => {
+    const active = link.dataset.route === route;
+    link.classList.toggle("active", active);
+    if (active) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+  element("page-title").textContent = ROUTES[route].title;
+  document.title = `${ROUTES[route].title} — Mail-Scope`;
+  const changed = state.route !== null && state.route !== route;
+  state.route = route;
+  if (changed) {
+    window.scrollTo(0, 0);
+    element(`${ROUTES[route].panel}-title`).focus({ preventScroll: true });
+  }
+}
+
+/**
+ * Disable every page except the case page until a case is open.
+ */
+function updateNavigationAvailability() {
+  document.querySelectorAll(".side-link[data-route]").forEach((link) => {
+    const disabled = !state.caseOpen && link.dataset.route !== "ugy";
+    if (disabled) {
+      link.setAttribute("aria-disabled", "true");
+      link.title = "Előbb nyisson meg egy ügyet.";
+    } else {
+      link.removeAttribute("aria-disabled");
+      link.removeAttribute("title");
+    }
+  });
+}
+
+document.querySelectorAll(".side-link[data-route]").forEach((link) => {
+  link.addEventListener("click", (event) => {
+    if (link.getAttribute("aria-disabled") === "true") event.preventDefault();
+  });
+});
+window.addEventListener("hashchange", showRoute);
+document.addEventListener("keydown", (event) => {
+  if (!event.ctrlKey || event.altKey || event.metaKey || !/^[1-5]$/.test(event.key)) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName))) {
+    return;
+  }
+  if (!element("app-shell").hidden) {
+    const route = ROUTE_ORDER[Number(event.key) - 1];
+    event.preventDefault();
+    if (state.caseOpen || route === "ugy") navigate(route);
+  }
+});
+
+/**
+ * Show the welcome screen without a case, and the workspace once one is open.
+ */
+function setWelcomeVisible(visible) {
+  const wasVisible = !element("welcome-screen").hidden;
+  element("welcome-screen").hidden = !visible;
+  element("app-shell").hidden = visible;
+  if (visible) {
+    if (window.MailScopePcb) window.MailScopePcb.mount(element("welcome-background"));
+    if (!wasVisible) {
+      refreshRecentCases();
+      element("welcome-title").focus({ preventScroll: true });
+    }
+  } else if (window.MailScopePcb) {
+    // No animation may keep running behind the workspace.
+    window.MailScopePcb.unmount();
+  }
+}
+
+/**
+ * Format when a recent case was last opened, relative to today.
+ */
+function formatRecentDate(value) {
+  const opened = new Date(value);
+  if (Number.isNaN(opened.getTime())) return "";
+  const startOfDay = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(opened)) / 86400000);
+  if (days === 0) return "ma";
+  if (days === 1) return "tegnap";
+  const sameYear = opened.getFullYear() === new Date().getFullYear();
+  return new Intl.DateTimeFormat("hu-HU", sameYear
+    ? { month: "short", day: "numeric" }
+    : { year: "numeric", month: "short", day: "numeric" }).format(opened);
+}
+
+/**
+ * List recently opened, still existing case folders on the welcome screen.
+ */
+async function refreshRecentCases() {
+  const section = element("recent-cases");
+  const list = element("recent-cases-list");
+  try {
+    const cases = await requestJson("/api/recent-cases");
+    list.replaceChildren();
+    cases.forEach((recent) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "recent-case";
+      button.title = recent.path;
+      const text = document.createElement("span");
+      text.className = "recent-case-text";
+      const name = document.createElement("span");
+      name.className = "recent-case-name";
+      name.textContent = recent.name;
+      const meta = document.createElement("span");
+      meta.className = "recent-case-meta";
+      meta.textContent = `${recent.source_count.toLocaleString("hu-HU")} forrás · ${recent.message_count.toLocaleString("hu-HU")} levél`;
+      text.append(name, meta);
+      const when = document.createElement("span");
+      when.className = "recent-case-when";
+      when.textContent = formatRecentDate(recent.opened_at);
+      button.append(text, when);
+      button.addEventListener("click", () => openCase(recent.path, "welcome-notice"));
+      list.append(button);
+    });
+    section.hidden = cases.length === 0;
+  } catch {
+    section.hidden = true;
+  }
+}
+
+/**
+ * Pick a case folder with the native dialog, then open or create the case there.
+ */
+async function browseAndOpenCase(buttonId) {
+  const button = element(buttonId);
+  button.disabled = true;
+  try {
+    const result = await requestJson("/api/browse", {
+      method: "POST",
+      body: JSON.stringify({ kind: "directory", initial_path: element("welcome-case-path").value.trim() }),
+    });
+    if (result.path) await openCase(result.path, "welcome-notice");
+  } catch (error) {
+    element("welcome-notice").textContent = error.message;
+    element("welcome-notice").classList.add("error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+element("welcome-new-case").addEventListener("click", () => browseAndOpenCase("welcome-new-case"));
+element("welcome-open-case").addEventListener("click", () => browseAndOpenCase("welcome-open-case"));
+element("welcome-path-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  openCase(element("welcome-case-path").value.trim(), "welcome-notice");
+});
 
 /**
  * Request JSON from the same-origin local API and preserve server error details.
@@ -295,7 +491,7 @@ function openConversationForMessage(message) {
   element("conversation-people").querySelectorAll("input[type=\"checkbox\"]").forEach((checkbox) => {
     checkbox.checked = selectedIds.has(checkbox.value);
   });
-  element("conversation-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  navigate("beszelgetes");
   if (matchedPeople.length < 2) {
     element("conversation-notice").textContent =
       "A beszélgetés megnyitásához rendelje a feladót és legalább egy címzettet két külön személyhez.";
@@ -332,7 +528,10 @@ function renderDetailedResults() {
       const meta = document.createElement("span");
       meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${message.sent_date || "Dátum nélkül"} · ${message.source_path}`;
       open.append(subject, meta);
-      open.addEventListener("click", () => openMessage(Number(message.message_id)));
+      open.addEventListener("click", () => {
+        navigate("archivum");
+        openMessage(Number(message.message_id));
+      });
 
       const labels = document.createElement("span");
       labels.className = "detailed-result-labels";
@@ -537,7 +736,16 @@ async function printDetailedSearchReport() {
  * Update source lists, case identity, and active indexing progress.
  */
 function renderStatus(status) {
-  if (status.version) element("app-version").textContent = status.version;
+  if (status.version) {
+    element("app-version").textContent = status.version;
+    element("welcome-version").textContent = status.version;
+  }
+  state.caseOpen = Boolean(status.case);
+  setWelcomeVisible(!state.caseOpen);
+  updateNavigationAvailability();
+  showRoute();
+  document.body.classList.remove("booting");
+  element("nav-indexing").hidden = !(status.job && status.job.running);
   element("case-label").textContent = status.case
     ? `${status.case.name} · ${status.case.path}`
     : "Nincs megnyitott ügy";
@@ -606,6 +814,13 @@ async function refreshStatus() {
     renderStatus(status);
     return status;
   } catch (error) {
+    if (document.body.classList.contains("booting")) {
+      // Without a status the workspace still shows, so the error is visible.
+      document.body.classList.remove("booting");
+      setWelcomeVisible(false);
+      updateNavigationAvailability();
+      showRoute();
+    }
     showNotice(error.message, true);
     return null;
   }
@@ -835,7 +1050,18 @@ function renderMessageDetail(detail) {
   top.className = "reader-top";
   const title = document.createElement("h3");
   title.textContent = detail.headers.subject || detail.message.subject || "(nincs tárgy)";
-  top.append(title);
+  const conversation = document.createElement("button");
+  conversation.type = "button";
+  conversation.className = "button quiet reader-conversation";
+  conversation.textContent = "Teljes beszélgetés";
+  conversation.title = "A feladó és a címzettek összes levele a beszélgetésnézetben";
+  conversation.addEventListener("click", () => openConversationForMessage({
+    participant_addresses: detail.participants
+      .filter((participant) => ["from", "to"].includes(participant.role))
+      .map((participant) => participant.address)
+      .join(","),
+  }));
+  top.append(title, conversation);
   ["from", "to", "cc", "bcc", "date", "message-id"].forEach((name) => {
     if (!detail.headers[name]) return;
     const row = document.createElement("div");
@@ -1088,8 +1314,8 @@ function conversationCard(message, people, personColors) {
   openOriginal.className = "timeline-open";
   openOriginal.textContent = "Eredeti levél megnyitása";
   openOriginal.addEventListener("click", () => {
+    navigate("archivum");
     openMessage(Number(message.message_id));
-    element("archive-panel").scrollIntoView({ behavior: "smooth", block: "start" });
   });
   card.append(subject, metadata, recipients, body, expand, openOriginal);
   return card;
@@ -1199,13 +1425,24 @@ element("source-folder-browse-button").addEventListener("click", () => {
 /**
  * Create or open the selected local case.
  */
-element("case-form").addEventListener("submit", async (event) => {
+element("case-form").addEventListener("submit", (event) => {
   event.preventDefault();
+  openCase(element("case-path").value.trim(), "case-notice");
+});
+
+/**
+ * Open or create a case, reset case-bound state, and show the workspace.
+ */
+async function openCase(path, noticeId) {
+  const notice = element(noticeId);
   try {
     const status = await requestJson("/api/case", {
       method: "POST",
-      body: JSON.stringify({ path: element("case-path").value.trim() }),
+      body: JSON.stringify({ path }),
     });
+    notice.textContent = "";
+    notice.classList.remove("error");
+    element("case-path").value = status.case ? status.case.path : path;
     state.lastPeopleRefresh = "";
     state.people = [];
     state.folders = [];
@@ -1220,9 +1457,10 @@ element("case-form").addEventListener("submit", async (event) => {
     await refreshArchive();
     showNotice("Az ügy megnyitva. A források most már felismerhetők és indexelhetők.");
   } catch (error) {
-    showNotice(error.message, true);
+    notice.textContent = error.message;
+    notice.classList.add("error");
   }
-});
+}
 
 /**
  * Start background indexing for the checked, previously discovered sources.

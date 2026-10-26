@@ -68,11 +68,13 @@ Az `.exe` indításakor a program automatikusan megnyitja a helyi felületet az 
 
 ## Használat
 
-1. Indítsa el a Mail-Scope-ot, majd nyisson meg vagy hozzon létre egy ügyet.
-2. Adjon meg forrásfájlt vagy mappát, és ellenőrizze a felismert forrásokat.
-3. Indítsa el az indexelést, majd várja meg a befejezését.
-4. Böngéssze az archívumot, hozzon létre személyeket és aliasokat a beszélgetésekhez, vagy használja a részletes keresést.
+1. Indítsa el a Mail-Scope-ot. Megnyitott ügy nélkül a nyitóképernyő jelenik meg: hozzon létre új ügyet, nyisson meg egy meglévő ügymappát, vagy válasszon a legutóbbi ügyek közül (ezek a `%APPDATA%\Mail-Scope\recent.json` fájlban tárolódnak, soha nem az ügy- vagy forrásmappában).
+2. Az **Ügy és források** lapon adjon meg forrásfájlt vagy mappát, és ellenőrizze a felismert forrásokat.
+3. Indítsa el az indexelést. Az oldalsávon a „01” melletti kis jelző bármelyik lapon mutatja, hogy indexelés fut.
+4. Használja a munkaterület lapjait: **Archívum böngésző**, **Beszélgetésnézet**, **Részletes keresés** és **Személyek** (itt hozhat létre személyeket és aliasokat a beszélgetésekhez).
 5. Csak a szükséges eredményeket exportálja. A CSV legfeljebb 10 000, az EML ZIP legfeljebb 500 levelet és 256 MiB exportált levéladatot, a nyomtatható PDF-jelentés legfeljebb 2000 találatot tartalmazhat.
+
+Minden lapnak saját címe van (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), így a Vissza/Előre gomb és a frissítés is az aktuális lapon marad; beviteli mezőn kívül a `Ctrl+1`…`Ctrl+5` vált lapot. Lapváltáskor megmaradnak a szűrők, a kijelölt levél, a betöltött beszélgetés és a keresési feltételek. Keskeny képernyőn az oldalsáv vízszintes, görgethető lapsávvá alakul. A nyitóképernyő áramköri animációja megáll, ha az ablak rejtett vagy ügy nyílik meg, és egyáltalán nem fut, ha a Windows „Animációk megjelenítése” beállítása ki van kapcsolva (csökkentett mozgás).
 
 A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
 
@@ -92,6 +94,20 @@ A Mail-Scope licencét a [LICENSE](./LICENSE) fájl tartalmazza (MIT). A PST/OST
 
 ## Képernyőképek
 
-Az alábbi részleteskeresés-képernyőkép kizárólag kitalált postafiókadatot tartalmaz:
+Minden képernyőkép kizárólag kitalált postafiókadatot és nevet tartalmaz (Teszt Antal, Teszt Anna, Teszt Béla, `@pelda.hu`).
+
+Nyitóképernyő:
+
+![Mail-Scope nyitóképernyő kitalált legutóbbi ügyekkel](./docs/screenshots/welcome.png)
+
+Archívum böngésző megnyitott levéllel és forenzikus adatokkal:
+
+![Mail-Scope archívum böngésző kitalált levelekkel](./docs/screenshots/archive.png)
+
+Két személy beszélgetésnézete:
+
+![Mail-Scope beszélgetés-idővonal két kitalált személlyel](./docs/screenshots/conversation.png)
+
+Részletes keresés:
 
 ![Mail-Scope részletes keresés kitalált találatokkal](./docs/screenshots/detailed-search.png)

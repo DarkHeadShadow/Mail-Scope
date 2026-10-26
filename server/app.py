@@ -8,7 +8,7 @@ import hashlib
 import io
 import json
 import logging
-import mimetypes
+import os
 import re
 import sqlite3
 import threading
@@ -49,6 +49,14 @@ _STATIC_ASSETS = {
         "image/png",
     ),
 }
+_UI_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/pcb-background.js": ("pcb-background.js", "text/javascript; charset=utf-8"),
+    "/styles.css": ("styles.css", "text/css; charset=utf-8"),
+}
+_MAX_RECENT_CASES = 5
 _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
 
@@ -104,8 +112,10 @@ class ApiError(Exception):
 class MailScopeApplication:
     """Hold the active case, discovery results, and optional indexing job."""
 
-    def __init__(self) -> None:
-        """Start with no active case or running background work."""
+    def __init__(self, recent_cases_file: Path | None = None) -> None:
+        """Start with no active case; optionally remember recent cases in a profile file."""
+        self.recent_cases_file = recent_cases_file
+        self._recent_counts: tuple[int, int] | None = None
         self._lock = threading.RLock()
         self.case_directory: Path | None = None
         self.database: IndexDatabase | None = None
@@ -141,6 +151,7 @@ class MailScopeApplication:
             self._verified_sources.clear()
             self._close_readers()
             self.job = None
+            self._recent_counts = None
             return self.status()
 
     def discover(self, path: str) -> list[dict[str, Any]]:
@@ -229,6 +240,11 @@ class MailScopeApplication:
                         job_data["summary"] = asdict(self.job.result(0))
                     except RuntimeError as error:
                         job_data["error"] = str(error.__cause__ or error)
+            sources = [_row_json(row) for row in self.database.sources()]
+            message_count = self.database.message_count()
+            if self._recent_counts != (len(sources), message_count):
+                self._recent_counts = (len(sources), message_count)
+                self._remember_case(len(sources), message_count)
             return {
                 "version": __version__,
                 "log": {
@@ -236,10 +252,74 @@ class MailScopeApplication:
                     "case": _optional_path(self.case_log),
                 },
                 "case": {"path": str(self.case_directory), "name": self.case_directory.name},
-                "sources": [_row_json(row) for row in self.database.sources()],
-                "message_count": self.database.message_count(),
+                "sources": sources,
+                "message_count": message_count,
                 "job": job_data,
             }
+
+    def recent_cases(self) -> list[dict[str, Any]]:
+        """Return up to five recently opened case folders that still exist."""
+        return [
+            entry
+            for entry in self._read_recent_cases()
+            if Path(entry["path"]).is_dir()
+        ][:_MAX_RECENT_CASES]
+
+    def _read_recent_cases(self) -> list[dict[str, Any]]:
+        """Load the profile's recent-case list, ignoring a missing or damaged file."""
+        if self.recent_cases_file is None:
+            return []
+        try:
+            entries = json.loads(self.recent_cases_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(entries, list):
+            return []
+        valid: list[dict[str, Any]] = []
+        for entry in entries:
+            if (
+                isinstance(entry, dict)
+                and isinstance(entry.get("path"), str)
+                and isinstance(entry.get("name"), str)
+                and isinstance(entry.get("source_count"), int)
+                and isinstance(entry.get("message_count"), int)
+                and isinstance(entry.get("opened_at"), str)
+            ):
+                valid.append(
+                    {
+                        key: entry[key]
+                        for key in ("path", "name", "source_count", "message_count", "opened_at")
+                    }
+                )
+        return valid
+
+    def _remember_case(self, source_count: int, message_count: int) -> None:
+        """Record the open case in the user profile, never in a case or source folder."""
+        if self.recent_cases_file is None or self.case_directory is None:
+            return
+        path = str(self.case_directory)
+        previous = [
+            entry
+            for entry in self._read_recent_cases()
+            if entry["path"].casefold() != path.casefold()
+        ]
+        entry = {
+            "path": path,
+            "name": self.case_directory.name,
+            "source_count": source_count,
+            "message_count": message_count,
+            "opened_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        try:
+            self.recent_cases_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.recent_cases_file.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps([entry, *previous][: _MAX_RECENT_CASES * 2], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary.replace(self.recent_cases_file)
+        except OSError:
+            logger.warning("Recent-case list could not be saved: %s", self.recent_cases_file)
 
     def archive(
         self,
@@ -849,13 +929,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return
         request = urlsplit(self.path)
         try:
-            if request.path in {
-                "/",
-                "/index.html",
-                "/app.js",
-                "/styles.css",
-                *_STATIC_ASSETS,
-            }:
+            if request.path in _UI_FILES or request.path in _STATIC_ASSETS:
                 self._serve_ui(request.path)
             elif request.path == "/api/status":
                 self._send_json(HTTPStatus.OK, self.server.application.status())
@@ -867,6 +941,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 )
             elif request.path == "/api/people":
                 self._send_json(HTTPStatus.OK, self.server.application.people())
+            elif request.path == "/api/recent-cases":
+                self._send_json(HTTPStatus.OK, self.server.application.recent_cases())
             elif request.path == "/api/searches":
                 self._send_json(
                     HTTPStatus.OK,
@@ -1194,9 +1270,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if route in _STATIC_ASSETS:
             file_path, content_type = _STATIC_ASSETS[route]
         else:
-            file_name = "index.html" if route in {"/", "/index.html"} else route.removeprefix("/")
+            # Explicit types: Windows registry MIME mappings must not change them.
+            file_name, content_type = _UI_FILES[route]
             file_path = _UI_DIRECTORY / file_name
-            content_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
         self._send_bytes(HTTPStatus.OK, file_path.read_bytes(), content_type)
 
     def _send_json(self, status: HTTPStatus, payload: Any) -> None:
@@ -1376,6 +1452,12 @@ def _positive_integer(value: str) -> int:
     if parsed <= 0:
         raise ValueError("A levélazonosítónak pozitívnak kell lennie.")
     return parsed
+
+
+def default_recent_cases_file() -> Path:
+    """Return the per-user recent-case list under %APPDATA%\\Mail-Scope."""
+    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    return Path(base) / "Mail-Scope" / "recent.json"
 
 
 def _optional_path(path: Path | None) -> str | None:

@@ -8,7 +8,7 @@ import sys
 import threading
 import webbrowser
 
-from .app import create_server
+from .app import MailScopeApplication, create_server, default_recent_cases_file
 from .applog import configure_logging
 
 
@@ -30,7 +30,10 @@ def main() -> None:
     log_path = configure_logging()
     logging.getLogger(__name__).info("Mail-Scope application log: %s", log_path)
     try:
-        http_server = create_server(port=arguments.port)
+        http_server = create_server(
+            MailScopeApplication(recent_cases_file=default_recent_cases_file()),
+            port=arguments.port,
+        )
     except OSError as error:
         _notify_startup_problem(
             f"A Mail-Scope nem tudott elindulni a {arguments.port}-es porton. "

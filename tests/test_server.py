@@ -116,6 +116,52 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(hashing.call_count, 1)
         self.assertTrue((self.case_directory / ".mailscope" / "index.sqlite3").is_file())
 
+    def test_recent_cases_lists_only_existing_folders_from_the_profile_file(self) -> None:
+        """Remember opened cases outside the case folder and drop removed folders."""
+        recent_file = self.root / "profile" / "Mail-Scope" / "recent.json"
+        application = MailScopeApplication(recent_cases_file=recent_file)
+        first = self.root / "Elso-ugy"
+        second = self.root / "Masodik-ugy"
+        application.select_case(str(first))
+        application.select_case(str(second))
+        missing = self.root / "Torolt-ugy"
+        entries = json.loads(recent_file.read_text(encoding="utf-8"))
+        entries.append(
+            {
+                "path": str(missing),
+                "name": "Torolt-ugy",
+                "source_count": 1,
+                "message_count": 2,
+                "opened_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+        recent_file.write_text(json.dumps(entries), encoding="utf-8")
+
+        recent = application.recent_cases()
+
+        self.assertEqual([entry["name"] for entry in recent], ["Masodik-ugy", "Elso-ugy"])
+        self.assertEqual(recent[0]["source_count"], 0)
+        self.assertEqual(recent[0]["message_count"], 0)
+        self.assertFalse(any(path.name == "recent.json" for path in second.rglob("*")))
+        self.assertEqual(MailScopeApplication().recent_cases(), [])
+
+        http_server = create_server(application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        connection.request("GET", "/api/recent-cases")
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            [entry["path"] for entry in json.loads(response.read())],
+            [str(second.resolve()), str(first.resolve())],
+        )
+
     def test_refuses_to_open_a_source_changed_after_indexing(self) -> None:
         """Prevent stale indexed locators from reading a modified source file."""
         self.application.select_case(str(self.case_directory))
@@ -401,9 +447,15 @@ class ServerTests(unittest.TestCase):
         self.assertIn('src="/assets/logo/png/mail-scope-logo-dark-bg.png"', html)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
 
+        self.assertIn('src="/pcb-background.js"', html)
+        self.assertIn('id="welcome-screen"', html)
+        self.assertNotIn("style=", html)
         for route, expected_type in (
             ("/favicon.ico", "image/vnd.microsoft.icon"),
             ("/assets/logo/png/mail-scope-logo-dark-bg.png", "image/png"),
+            ("/app.js", "text/javascript; charset=utf-8"),
+            ("/pcb-background.js", "text/javascript; charset=utf-8"),
+            ("/styles.css", "text/css; charset=utf-8"),
         ):
             connection.request("GET", route)
             response = connection.getresponse()

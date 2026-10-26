@@ -8,20 +8,81 @@
     <title>Mail-Scope — levélarchívum</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <link rel="stylesheet" href="/styles.css">
+    <script src="/pcb-background.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
-  <body>
-    <div class="app-shell">
+  <body class="booting">
+    <div id="welcome-screen" class="welcome" hidden>
+      <div id="welcome-background" class="welcome-background" aria-hidden="true"></div>
+      <div class="welcome-fog welcome-fog-top" aria-hidden="true"></div>
+      <div class="welcome-fog welcome-fog-left" aria-hidden="true"></div>
+      <div class="welcome-fog welcome-fog-glow" aria-hidden="true"></div>
+      <div class="welcome-content">
+        <header class="welcome-header">
+          <div class="welcome-brand">
+            <svg aria-hidden="true" width="44" height="44" viewBox="0 0 64 64"><circle cx="28" cy="28" r="19" fill="none" stroke="#4ADE80" stroke-width="3"></circle><path d="M28 4v9M28 43v9M4 28h9M43 28h9" stroke="#4ADE80" stroke-width="3" stroke-linecap="round"></path><path d="M42 42L57 57" stroke="#4ADE80" stroke-width="5.5" stroke-linecap="round"></path><rect x="18.5" y="21.5" width="19" height="13" rx="1.8" fill="none" stroke="#DCE7E0" stroke-width="2.4"></rect><path d="M19 23L28 29.5L37 23" fill="none" stroke="#DCE7E0" stroke-width="2.4" stroke-linejoin="round"></path></svg>
+            <div class="welcome-brand-text">
+              <span class="welcome-name">Mail-<span>Scope</span></span>
+              <span class="welcome-tagline">Levelezés-elemző</span>
+            </div>
+          </div>
+        </header>
+
+        <main class="welcome-main">
+          <div class="welcome-intro">
+            <span class="welcome-kicker">Levelezés-elemzés elemzőknek</span>
+            <h1 id="welcome-title" tabindex="-1">Minden levél egy helyen, időrendben.</h1>
+            <p>PST, OST és MBOX postafiókok böngészése, keresése és beszélgetés-elemzése – helyben, internetkapcsolat nélkül. A forrásfájlok érintetlenek maradnak.</p>
+          </div>
+          <div class="welcome-actions">
+            <button id="welcome-new-case" class="welcome-button primary" type="button">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+              Új ügy létrehozása
+            </button>
+            <button id="welcome-open-case" class="welcome-button" type="button">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
+              Ügy megnyitása…
+            </button>
+          </div>
+          <form id="welcome-path-form" class="welcome-path-form">
+            <label class="field grow">
+              <span>Vagy adja meg az ügymappa teljes elérési útját</span>
+              <input id="welcome-case-path" type="text" placeholder="Például: E:\Ügyek\2026-014" required>
+            </label>
+            <button class="welcome-button compact" type="submit">Megnyitás</button>
+          </form>
+          <p id="welcome-notice" class="notice" role="status" aria-live="polite"></p>
+
+          <section id="recent-cases" class="recent-cases" aria-labelledby="recent-cases-title" hidden>
+            <h2 id="recent-cases-title" class="recent-cases-title">Legutóbbi ügyek</h2>
+            <div id="recent-cases-list"></div>
+          </section>
+        </main>
+
+        <footer class="welcome-footer">
+          <span>v<span id="welcome-version">0.1.0</span> · Készítő: Bálint Szabolcs</span>
+          <span class="welcome-offline">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ADE80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
+            Offline mód – az adatok nem hagyják el a gépet
+          </span>
+        </footer>
+      </div>
+    </div>
+
+    <div id="app-shell" class="app-shell">
       <aside class="sidebar">
-        <a class="brand" href="/" aria-label="Mail-Scope kezdőlap">
+        <a class="brand" href="#/ugy" aria-label="Mail-Scope · Ügy és források">
           <img class="brand-logo" src="/assets/logo/png/mail-scope-logo-dark-bg.png" alt="Mail-Scope — levelezés-elemző">
         </a>
         <div class="sidebar-divider"></div>
         <p class="eyebrow">MUNKATERÜLET</p>
-        <a class="side-link active" href="#case-panel"><span>01</span> Ügy és források</a>
-        <a class="side-link" href="#archive-panel"><span>02</span> Archívum böngésző</a>
-        <a class="side-link" href="#conversation-panel"><span>03</span> Beszélgetésnézet</a>
-        <a class="side-link" href="#detailed-search-panel"><span>04</span> Részletes keresés</a>
+        <nav class="side-nav" aria-label="Munkaterület lapjai">
+          <a class="side-link" href="#/ugy" data-route="ugy"><span>01</span> Ügy és források<span id="nav-indexing" class="nav-indexing" role="img" aria-label="Indexelés folyamatban" hidden></span></a>
+          <a class="side-link" href="#/archivum" data-route="archivum"><span>02</span> Archívum böngésző</a>
+          <a class="side-link" href="#/beszelgetes" data-route="beszelgetes"><span>03</span> Beszélgetésnézet</a>
+          <a class="side-link" href="#/kereses" data-route="kereses"><span>04</span> Részletes keresés</a>
+          <a class="side-link" href="#/szemelyek" data-route="szemelyek"><span>05</span> Személyek</a>
+        </nav>
         <div class="sidebar-spacer"></div>
         <div class="privacy-card">
           <span class="privacy-dot"></span>
@@ -30,7 +91,7 @@
         <p class="creator">Készítette: Bálint Szabolcs</p>
       </aside>
 
-      <main class="main-area">
+      <main id="main-area" class="main-area">
         <header class="topbar">
           <div>
             <p class="eyebrow">MAIL-SCOPE <span id="app-version">0.1.0</span> / HELYI MUNKATERÜLET</p>
@@ -45,11 +106,11 @@
           </div>
         </header>
 
-        <section class="panel case-panel" id="case-panel">
+        <section class="panel case-panel" id="case-panel" data-page="ugy" aria-labelledby="case-panel-title">
           <div class="section-heading">
             <div>
-              <p class="eyebrow">00 / MUNKAMENET</p>
-              <h2>Ügy és források</h2>
+              <p class="eyebrow">01 / MUNKAMENET</p>
+              <h2 id="case-panel-title" class="page-heading" tabindex="-1">Ügy és források</h2>
               <p class="muted">Az index és minden saját adat az ügy mappájának <code>.mailscope</code> almappájába kerül.</p>
             </div>
             <div class="case-stat"><strong id="message-count">0</strong><span>indexelt levél</span></div>
@@ -94,11 +155,11 @@
           <p id="case-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
 
-        <section class="panel people-panel" id="people-panel">
+        <section class="panel people-panel" id="people-panel" data-page="szemelyek" aria-labelledby="people-panel-title" hidden>
           <div class="section-heading">
             <div>
-              <p class="eyebrow">02 / SZEMÉLYEK</p>
-              <h2>Személyek és e-mail-aliasok</h2>
+              <p class="eyebrow">05 / SZEMÉLYEK</p>
+              <h2 id="people-panel-title" class="page-heading" tabindex="-1">Személyek és e-mail-aliasok</h2>
               <p class="muted">A beszélgetésnézet személyeket, nem külön e-mail-címeket kapcsol össze.</p>
             </div>
           </div>
@@ -123,11 +184,11 @@
           <p id="people-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
 
-        <section class="panel conversation-panel" id="conversation-panel">
+        <section class="panel conversation-panel" id="conversation-panel" data-page="beszelgetes" aria-labelledby="conversation-panel-title" hidden>
           <div class="section-heading">
             <div>
               <p class="eyebrow">03 / IDŐVONAL</p>
-              <h2>Beszélgetésnézet</h2>
+              <h2 id="conversation-panel-title" class="page-heading" tabindex="-1">Beszélgetésnézet</h2>
               <p class="muted">Válasszon legalább két személyt; a résztvevői aliasokat az ügy személylistája fogja össze.</p>
             </div>
             <div class="conversation-actions">
@@ -173,11 +234,11 @@
           </div>
         </section>
 
-        <section class="panel archive-panel" id="archive-panel">
+        <section class="panel archive-panel" id="archive-panel" data-page="archivum" aria-labelledby="archive-panel-title" hidden>
           <div class="section-heading archive-heading">
             <div>
               <p class="eyebrow">02 / VIZSGÁLAT</p>
-              <h2>Archívum böngésző</h2>
+              <h2 id="archive-panel-title" class="page-heading" tabindex="-1">Archívum böngésző</h2>
               <p class="muted">A lista indexelt adatokat mutat; a kiválasztott levél az ellenőrzött eredeti forrásból nyílik meg.</p>
             </div>
           </div>
@@ -226,11 +287,11 @@
           </div>
         </section>
 
-        <section class="panel detailed-search-panel" id="detailed-search-panel">
+        <section class="panel detailed-search-panel" id="detailed-search-panel" data-page="kereses" aria-labelledby="detailed-search-panel-title" hidden>
           <div class="section-heading">
             <div>
               <p class="eyebrow">04 / KERESÉS ÉS CÍMKÉZÉS</p>
-              <h2>Részletes keresés</h2>
+              <h2 id="detailed-search-panel-title" class="page-heading" tabindex="-1">Részletes keresés</h2>
               <p class="muted">Állítson össze feltételeket az indexelt levelekhez. A címkék az ügy adatbázisába kerülnek, nem módosítják a forrásfájlokat.</p>
             </div>
           </div>

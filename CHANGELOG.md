@@ -29,6 +29,9 @@ Project changes are recorded here. This project has not made a public release ye
 - Added prefix full-text search with Hungarian error messages, stored message bodies only once (in FTS), excluded notes to self from the two-person conversation mode, and paged archive and search results without window functions.
 - Moved source hashing out of the application lock, reused recorded hashes while a source's file signature is unchanged, and kept PST/OST stores open between message reads.
 - Added a rotating application log, a per-case log, and a provenance `MANIFEST.txt` in EML ZIP exports.
+- Split the workspace into five pages with hash routes (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), Back/Forward and reload support, `Ctrl+1`…`Ctrl+5`, preserved page state, disabled pages without a case, a sidebar indexing indicator, and a horizontal tab bar on narrow screens; jumps between views now switch pages, and the reading pane gained a “Teljes beszélgetés” button.
+- Added a welcome screen with a CSS-animated 3D circuit-board background (fixed seed, paused when hidden, removed after a case opens, static with reduced motion) and a recent-case list stored in `%APPDATA%\Mail-Scope\recent.json` (`GET /api/recent-cases`).
+- Served UI files with explicit MIME types and refreshed the README screenshots with fictional data.
 - Selected the MIT License for Mail-Scope; third-party components retain their own licenses.
 
 This is a development snapshot, not a public release.
