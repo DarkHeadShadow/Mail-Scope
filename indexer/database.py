@@ -1158,6 +1158,12 @@ class IndexDatabase:
                         FROM participants
                         WHERE participants.message_id = messages.id
                           AND participants.role = 'from') AS sender,
+                       (SELECT count(*) FROM attachments WHERE attachments.message_id = messages.id) AS attachment_count,
+                       (SELECT group_concat(filename, char(31)) FROM (
+                            SELECT filename FROM attachments
+                            WHERE attachments.message_id = messages.id
+                            ORDER BY filename LIMIT 5
+                       )) AS attachment_names,
                        (SELECT count(*) FROM occurrences AS copies
                         WHERE copies.message_id = messages.id) AS copy_count,
                        (SELECT count(*) FROM occurrences AS earlier
@@ -1181,8 +1187,13 @@ class IndexDatabase:
         operator: str,
         limit: int = 100,
         offset: int = 0,
+        has_attachment: bool = False,
     ) -> tuple[list[sqlite3.Row], int]:
-        """Search indexed mail with flat conditions or nested AND/OR groups."""
+        """Search indexed mail with flat conditions or nested AND/OR groups.
+
+        ``has_attachment`` restricts the whole query, combined with AND, to
+        messages with at least one attachment, whatever the group operators.
+        """
         if operator not in {"AND", "OR"}:
             raise ValueError("Search operator must be AND or OR")
         if limit <= 0 or offset < 0:
@@ -1231,14 +1242,10 @@ class IndexDatabase:
                 if not value:
                     raise ValueError("Text search conditions must not be empty")
                 if field == "text":
+                    # The FTS match runs once per query; a correlated EXISTS
+                    # would evaluate it again for every message row.
                     expression_parts.append(
-                        """
-                        EXISTS (
-                            SELECT 1 FROM messages_fts
-                            WHERE messages_fts.rowid = messages.id
-                              AND messages_fts MATCH ?
-                        )
-                        """
+                        "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
                     )
                     match = fts_query(value)
                     if not match:
@@ -1352,6 +1359,11 @@ class IndexDatabase:
             where_clause = f" {operator} ".join(grouped_expressions)
         else:
             where_clause = f" {operator} ".join(expression_parts)
+        if has_attachment:
+            where_clause = (
+                f"({where_clause}) AND EXISTS ("
+                "SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
+            )
         with self.connection() as connection, _fts_errors():
             total_row = connection.execute(
                 f"SELECT count(*) AS count FROM messages WHERE {where_clause}",
@@ -1401,6 +1413,12 @@ class IndexDatabase:
                                  ON occurrence_labels.occurrence_id = labeled_occurrence.id
                                WHERE labeled_occurrence.message_id = messages.id
                            ) AS labels,
+                           (SELECT count(*) FROM attachments WHERE attachments.message_id = messages.id) AS attachment_count,
+                           (SELECT group_concat(filename, char(31)) FROM (
+                                SELECT filename FROM attachments
+                                WHERE attachments.message_id = messages.id
+                                ORDER BY filename LIMIT 5
+                           )) AS attachment_names,
                            (
                                SELECT count(*) FROM occurrences AS copies
                                WHERE copies.message_id = messages.id
@@ -1657,6 +1675,12 @@ class IndexDatabase:
                     SELECT messages.id AS message_id, messages.subject,
                            messages.sent_date, messages.message_id AS internet_message_id,
                            messages.thread_key, messages_fts.body AS body,
+                           (SELECT count(*) FROM attachments WHERE attachments.message_id = messages.id) AS attachment_count,
+                           (SELECT group_concat(filename, char(31)) FROM (
+                                SELECT filename FROM attachments
+                                WHERE attachments.message_id = messages.id
+                                ORDER BY filename LIMIT 5
+                           )) AS attachment_names,
                            messages.content_hash
                     FROM messages
                     LEFT JOIN messages_fts ON messages_fts.rowid = messages.id

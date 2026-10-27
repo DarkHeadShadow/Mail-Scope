@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<title>Melléklet-nézegető</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#0A0E0C}
+a{color:#4ADE80}a:hover{color:#86EFAC}
+</style>
+</helmet>
+<div style="width: 100%; min-height: 900px; box-sizing: border-box; background: #0A0E0C; color: #DCE7E0; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column">
+
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 12px 20px; border-bottom: 1px solid #22302A; background: #0D1310">
+    <nav aria-label="Útvonal" style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: #93A89C; flex: 1 1 480px; min-width: 0">
+      <a href="Main.dc.html" style="color: #93A89C; text-decoration: none">Archívum</a>
+      <span aria-hidden="true">›</span>
+      <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Re: Szerződés-tervezet – 3. verzió</span>
+      <span aria-hidden="true">›</span>
+      <span style="color: #DCE7E0; font-weight: 600">Kotberszamitas.xlsx</span>
+    </nav>
+    <span style="display: flex; align-items: center; gap: 8px; padding: 5px 10px; border: 1px solid #24543A; border-radius: 999px; background: #0F1D15; font-size: 12px; color: #B7E4C7">
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ADE80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"></path></svg>
+      Biztonságos nézet – a fájlból semmi nem fut
+    </span>
+    <button type="button" style="padding: 7px 12px; border-radius: 6px; border: 1px solid #22302A; background: #101613; color: #DCE7E0; font: inherit; font-size: 13px">← Előző</button>
+    <button type="button" style="padding: 7px 12px; border-radius: 6px; border: 1px solid #22302A; background: #101613; color: #DCE7E0; font: inherit; font-size: 13px">Következő →</button>
+    <button type="button" aria-label="Nézegető bezárása" style="width: 36px; height: 36px; border-radius: 6px; border: 1px solid #22302A; background: #101613; color: #DCE7E0; font: inherit; font-size: 18px">×</button>
+  </header>
+
+  <div style="flex: 1; display: flex; flex-wrap: wrap; min-height: 0">
+
+    <aside aria-label="A levél mellékletei" style="flex: 0 1 280px; min-width: 240px; box-sizing: border-box; padding: 16px 12px; border-right: 1px solid #22302A; background: #0D1310; display: flex; flex-direction: column; gap: 6px">
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 8px 8px">
+        <span style="font-size: 12px; font-weight: 600; color: #93A89C; text-transform: uppercase; letter-spacing: 0.06em">Mellékletek</span>
+        <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #93A89C">7 + 5 beágyazott</span>
+      </div>
+      <sc-for list="{{files}}" as="f" hint-placeholder-count="11">
+        <a href="#" style="display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px {{f.indent}}; border-radius: 6px; text-decoration: none; color: #DCE7E0; background: {{f.bg}}; box-shadow: {{f.ring}}">
+          <span style="flex: 0 0 auto; min-width: 38px; padding: 2px 0; border-radius: 4px; background: {{f.badgeBg}}; color: {{f.badgeFg}}; font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 500; text-align: center">{{f.kind}}</span>
+          <span style="display: flex; flex-direction: column; min-width: 0">
+            <span style="font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.name}}</span>
+            <span style="font-size: 11px; color: {{f.metaColor}}">{{f.meta}}</span>
+          </span>
+        </a>
+      </sc-for>
+      <div style="margin-top: auto; padding: 12px 8px 0; border-top: 1px solid #22302A; display: flex; flex-direction: column; gap: 8px">
+        <button type="button" style="min-height: 40px; border-radius: 6px; border: 1px solid #22302A; background: #101613; color: #DCE7E0; font: inherit; font-size: 13px">Összes mentése (ZIP + jegyzék)</button>
+      </div>
+    </aside>
+
+    <main aria-label="Melléklet tartalma" style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: #0A0E0C">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid #22302A; background: #0D1310">
+        <span style="padding: 3px 8px; border-radius: 4px; background: #1D4A2E; color: #B7E4C7; font-family: 'IBM Plex Mono', monospace; font-size: 11px">XLSX</span>
+        <span style="font-weight: 600">Kotberszamitas.xlsx</span>
+        <span style="font-size: 12px; color: #93A89C">3 munkalap · 1 rejtett</span>
+        <div role="group" aria-label="Nézet" style="display: flex; margin-left: auto; border: 1px solid #22302A; border-radius: 6px; overflow: hidden">
+          <button type="button" aria-pressed="true" style="padding: 6px 12px; border: none; background: #16261D; color: #DCE7E0; font: inherit; font-size: 12px; font-weight: 600; box-shadow: inset 0 -2px 0 #4ADE80">Táblázat</button>
+          <button type="button" aria-pressed="false" style="padding: 6px 12px; border: none; border-left: 1px solid #22302A; background: #101613; color: #C3D2C9; font: inherit; font-size: 12px">Képletek</button>
+          <button type="button" aria-pressed="false" style="padding: 6px 12px; border: none; border-left: 1px solid #22302A; background: #101613; color: #C3D2C9; font: inherit; font-size: 12px">Pontos nézet (LibreOffice)</button>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid #22302A; border-radius: 6px; background: #101613; flex: 0 1 220px">
+          <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#93A89C" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <input type="search" aria-label="Keresés a mellékletben" placeholder="Keresés a fájlban" style="flex: 1; min-width: 0; background: transparent; border: none; color: #DCE7E0; font: inherit; font-size: 13px; outline: none">
+        </div>
+        <button type="button" style="padding: 7px 14px; border-radius: 6px; border: none; background: #4ADE80; color: #06210F; font: inherit; font-size: 13px; font-weight: 600">Mentés…</button>
+      </div>
+
+      <div style="display: flex; align-items: center; gap: 0; border-bottom: 1px solid #22302A; background: #0D1310; font-family: 'IBM Plex Mono', monospace; font-size: 13px">
+        <span style="width: 64px; padding: 8px 10px; border-right: 1px solid #22302A; color: #93A89C; text-align: center">D7</span>
+        <span style="padding: 8px 12px; color: #93A89C">ƒx</span>
+        <span style="padding: 8px 4px; color: #DCE7E0">=SUM(D2:D5)</span>
+        <span style="margin-left: auto; padding: 8px 14px; color: #93A89C; font-family: 'IBM Plex Sans', sans-serif; font-size: 12px">tárolt érték: 1 639 750</span>
+      </div>
+
+      <div style="flex: 1; overflow: auto; padding: 0">
+        <table style="border-collapse: collapse; min-width: 760px; width: 100%; font-size: 13px">
+          <thead>
+            <tr>
+              <th scope="col" style="width: 44px; padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500"></th>
+              <th scope="col" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace">A</th>
+              <th scope="col" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace">B</th>
+              <th scope="col" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace">C</th>
+              <th scope="col" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace">D</th>
+              <th scope="col" style="width: 26px; padding: 6px 0; background: #2A2110; border: 1px solid #5E4618; color: #F2B544; font-weight: 600; font-family: 'IBM Plex Mono', monospace; font-size: 11px" title="Rejtett oszlop">E</th>
+              <th scope="col" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace">F</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{rows}}" as="r" hint-placeholder-count="12">
+              <tr>
+                <th scope="row" style="padding: 6px; background: #101613; border: 1px solid #1B2721; color: #93A89C; font-weight: 500; font-family: 'IBM Plex Mono', monospace; font-size: 12px">{{r.n}}</th>
+                <td style="padding: 6px 10px; border: 1px solid #1B2721; font-weight: {{r.w}}; white-space: nowrap">{{r.a}}</td>
+                <td style="padding: 6px 10px; border: 1px solid #1B2721; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: {{r.w}}">{{r.b}}</td>
+                <td style="padding: 6px 10px; border: 1px solid #1B2721; text-align: right; font-family: 'IBM Plex Mono', monospace; position: relative; background: {{r.cBg}}">{{r.c}}<sc-if value="{{r.note}}" hint-placeholder-val="{{ false }}"><span aria-label="Megjegyzés" role="img" style="position: absolute; top: 0; right: 0; width: 0; height: 0; border-top: 9px solid #F2B544; border-left: 9px solid transparent"></span></sc-if></td>
+                <td style="padding: 6px 10px; border: 1px solid #1B2721; text-align: right; font-family: 'IBM Plex Mono', monospace; font-weight: {{r.w}}; background: {{r.dBg}}; box-shadow: {{r.dRing}}">{{r.d}}</td>
+                <td style="padding: 0; border: 1px solid #5E4618; background: #1E1810"></td>
+                <td style="padding: 6px 10px; border: 1px solid #1B2721; color: #B7C7BE; white-space: nowrap">{{r.f}}</td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+
+      <div role="tablist" aria-label="Munkalapok" style="display: flex; flex-wrap: wrap; gap: 0; border-top: 1px solid #22302A; background: #0D1310">
+        <sc-for list="{{sheets}}" as="s" hint-placeholder-count="4">
+          <button type="button" role="tab" aria-selected="{{s.sel}}" style="display: flex; align-items: center; gap: 8px; padding: 9px 16px; border: none; border-right: 1px solid #22302A; background: {{s.bg}}; color: {{s.color}}; font: inherit; font-size: 13px; box-shadow: {{s.ring}}">
+            <sc-if value="{{s.hidden}}" hint-placeholder-val="{{ false }}">
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3l18 18"></path><path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a15.6 15.6 0 0 1-3 3.4M6.6 6.6C4.3 8.1 3 12 3 12s4 6 9 6c1.5 0 2.9-.4 4.1-1"></path></svg>
+            </sc-if>
+            {{s.name}}
+            <sc-if value="{{s.tag}}" hint-placeholder-val="{{ false }}">
+              <span style="padding: 1px 6px; border-radius: 3px; background: {{s.tagBg}}; color: #1A1200; font-size: 10px; font-weight: 600">{{s.tag}}</span>
+            </sc-if>
+          </button>
+        </sc-for>
+      </div>
+    </main>
+
+    <aside aria-label="Fájladatok" style="flex: 0 1 320px; min-width: 260px; box-sizing: border-box; padding: 18px 16px; border-left: 1px solid #22302A; background: #0D1310; display: flex; flex-direction: column; gap: 18px; font-size: 13px">
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; color: #93A89C; text-transform: uppercase; letter-spacing: 0.06em">Fájl</h2>
+        <div style="display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px">
+          <span style="color: #93A89C">Méret</span><span>36 KB (36 864 bájt)</span>
+          <span style="color: #93A89C">Típus</span><span>Excel-munkafüzet <span style="color: #4ADE80">· egyezik a tartalommal</span></span>
+          <span style="color: #93A89C">SHA-256</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 11px; overflow-wrap: anywhere">[SHA-256 megnyitáskor számolva]</span>
+          <span style="color: #93A89C">Hely</span><span style="font-size: 12px">teszt.antal.pst › Inbox › levél #4127 › 2. melléklet</span>
+          <span style="color: #93A89C">Példány</span><span>2 forrásban azonos</span>
+        </div>
+      </section>
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; color: #93A89C; text-transform: uppercase; letter-spacing: 0.06em">Dokumentum-tulajdonságok</h2>
+        <div style="display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px">
+          <span style="color: #93A89C">Szerző</span><span>Teszt Anna</span>
+          <span style="color: #93A89C">Utolsó mentő</span><span>Kovács Béla</span>
+          <span style="color: #93A89C">Létrehozva</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px">2023-05-08 16:12</span>
+          <span style="color: #93A89C">Módosítva</span><span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px">2023-05-12 13:58</span>
+          <span style="color: #93A89C">Alkalmazás</span><span>Microsoft Excel</span>
+        </div>
+      </section>
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; color: #93A89C; text-transform: uppercase; letter-spacing: 0.06em">Elemzői jelzések</h2>
+        <sc-for list="{{flags}}" as="g" hint-placeholder-count="6">
+          <div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; background: {{g.bg}}; border: 1px solid {{g.border}}">
+            <span style="width: 8px; height: 8px; border-radius: 50%; background: {{g.dot}}; flex: 0 0 auto"></span>
+            <span style="flex: 1">{{g.text}}</span>
+            <span style="font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: #93A89C">{{g.count}}</span>
+          </div>
+        </sc-for>
+      </section>
+      <p style="margin: 0; margin-top: auto; font-size: 12px; line-height: 1.5; color: #93A89C">A melléklet az eredeti forrásból, a memóriában nyílik meg. Makrók, külső hivatkozások és beágyazott programok nem futnak.</p>
+    </aside>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const badge = {
+      DOCX: ['#93C5FD', '#0B1B33'], XLSX: ['#4ADE80', '#06210F'], PDF: ['#F87171', '#2A0909'],
+      TXT: ['#C3D2C9', '#101613'], TIFF: ['#C4B5FD', '#1C1233'], ZIP: ['#F2B544', '#2A1A00'],
+      JPG: ['#C4B5FD', '#1C1233'], MSG: ['#67E8F9', '#082F35'], EXE: ['#3A1414', '#FCA5A5']
+    };
+    const f = (kind, name, meta, level, opts) => {
+      const o = opts || {};
+      return {
+        kind: kind, name: name, meta: meta,
+        indent: (8 + level * 18) + 'px',
+        badgeBg: badge[kind][0], badgeFg: badge[kind][1],
+        bg: o.active ? '#16261D' : (o.warn ? '#2A160F' : 'transparent'),
+        ring: o.active ? 'inset 3px 0 0 #4ADE80' : 'none',
+        metaColor: o.warn ? '#FDBA74' : '#93A89C'
+      };
+    };
+    const files = [
+      f('DOCX', 'Szerzodes_v3_AT_javitva.docx', '84 KB · Word', 0),
+      f('XLSX', 'Kotberszamitas.xlsx', '36 KB · 3 munkalap · 1 rejtett', 0, { active: true }),
+      f('PDF', 'Melleklet_A_fizetesi_utemezes.pdf', '412 KB · 12 oldal', 0),
+      f('TXT', 'jegyzet_hetfo.txt', '2 KB · Windows-1250', 0),
+      f('TIFF', 'alairt_oldal_scan.tif', '1,2 MB · 2 oldal', 0),
+      f('ZIP', 'szamlak_2023_05.zip', '640 KB · 4 fájl', 0),
+      f('PDF', 'szamla_0412.pdf', '1 oldal', 1),
+      f('PDF', 'szamla_0413.pdf', '1 oldal', 1),
+      f('JPG', 'IMG_0412.jpg', 'Kép · GPS-adattal', 1),
+      f('MSG', 'Fwd_Ajanlat.msg', 'Csatolt levél · 2023-04-28', 1),
+      f('PDF', 'ajanlat_v1.pdf', '5 oldal', 2),
+      f('EXE', 'fizetes_reszletek.pdf.exe', 'Futtatható – nincs előnézet', 0, { warn: true })
+    ];
+    const row = (n, a, b, c, d, fv, o) => {
+      const opt = o || {};
+      return {
+        n: n, a: a, b: b, c: c, d: d, f: fv,
+        w: opt.bold ? 600 : 400,
+        note: !!opt.note,
+        cBg: opt.note ? '#1E1810' : 'transparent',
+        dBg: opt.sel ? '#16261D' : 'transparent',
+        dRing: opt.sel ? 'inset 0 0 0 2px #4ADE80' : 'none'
+      };
+    };
+    const rows = [
+      row(1, 'Tétel', 'Szerződéses érték (Ft)', 'Késés (nap)', 'Kötbér (Ft)', 'Megjegyzés', { bold: true }),
+      row(2, 'Szoftverlicenc', '12 400 000', '14', '868 000', ''),
+      row(3, 'Implementáció', '8 750 000', '9', '393 750', ''),
+      row(4, 'Oktatás', '1 200 000', '0', '0', 'határidőben'),
+      row(5, 'Támogatás 1. év', '3 600 000', '21', '378 000', 'vis maior?', { note: true }),
+      row(6, '', '', '', '', ''),
+      row(7, 'Összesen', '25 950 000', '', '1 639 750', '', { bold: true, sel: true }),
+      row(8, 'Kötbér-plafon (10%)', '', '', '2 595 000', ''),
+      row(9, 'Érvényesítendő', '', '', '1 639 750', 'MIN(D7;D8)', { bold: true }),
+      row(10, '', '', '', '', ''),
+      row(11, '', '', '', '', ''),
+      row(12, '', '', '', '', '')
+    ];
+    const sheets = [
+      { name: 'Összesítő', sel: 'false', hidden: false, tag: '', tagBg: 'transparent', bg: 'transparent', color: '#C3D2C9', ring: 'none' },
+      { name: 'Számítás', sel: 'true', hidden: false, tag: '', tagBg: 'transparent', bg: '#16261D', color: '#DCE7E0', ring: 'inset 0 2px 0 #4ADE80' },
+      { name: 'Eredeti ajánlat', sel: 'false', hidden: true, tag: 'REJTETT', tagBg: '#F2B544', bg: '#1E1810', color: '#F2D9A0', ring: 'none' }
+    ];
+    const flag = (text, count, level) => ({
+      text: text, count: count,
+      dot: level === 'warn' ? '#F2B544' : (level === 'ok' ? '#4ADE80' : '#93A89C'),
+      bg: level === 'warn' ? '#1E1810' : '#101613',
+      border: level === 'warn' ? '#5E4618' : '#22302A'
+    });
+    const flags = [
+      flag('Rejtett munkalap', '1', 'warn'),
+      flag('Rejtett oszlop (E)', '1', 'warn'),
+      flag('Cellamegjegyzés', '3', 'info'),
+      flag('Képlet', '12', 'info'),
+      flag('Makró, külső hivatkozás', 'nincs', 'ok')
+    ];
+    return { files: files, rows: rows, sheets: sheets, flags: flags };
+  }
+}
+</script>
+</body>
+</html>

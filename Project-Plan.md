@@ -56,7 +56,8 @@ Forrás lehet:
 - `indexer/` – a forrásolvasókból SQLite-ba ír: levelek, címek, résztvevők (from/to/cc/bcc),
   mellékletek metaadatai, mappa, forrás, lokátor, Message-ID / In-Reply-To / References,
   levelenkénti tartalom-hash. Teljes szöveges keresés: **SQLite FTS5**
-  (tárgy + törzs + mellékletnevek; később melléklet-szöveg is).
+  (tárgy + törzs + mellékletnevek; ügyenként kapcsolhatóan a mellékletek szövege is, lásd a
+  4. képernyőt).
   - Háttérben fut, folyamatjelzővel.
   - Megszakítható és folytatható.
   - Új forrás hozzáadásakor csak azt indexeli.
@@ -105,9 +106,29 @@ Forrás lehet:
    - Feltételépítő (ÉS/VAGY, csoportok) és szöveges lekérdezés
      (`from:"…" AND to:"…" AND text:(a OR b) AND date:2023-01-01..2023-12-31 AND has:attachment`).
    - Szűkítés feladó / hónap / mappa / forrás / melléklettípus szerint.
+   - [x] Mellékletjelzés (gemkapocs + darabszám, `title`/`aria-label` a legfeljebb öt névvel)
+     a találatokban, az Archívum levéllistájában és a Beszélgetésnézet buborékjain, valamint
+     „Csak melléklettel” kapcsológomb (`aria-pressed`), amely ÉS kapcsolattal az egész
+     lekérdezésre vonatkozik, VAGY csoportok mellett is; a mentett keresés és minden export
+     (CSV, EML ZIP, PDF) megőrzi. A CSV „Mellékletek száma” és „Mellékletek neve” oszlopot kap.
+     A gyanús mellékletek színjelzése a melléklet-nézegetővel együtt készül el
+     (`docs/feladatok/kereses-mellekletjelzes.md`).
    - Mentett keresések, címkézés.
    - Export CSV, EML ZIP + SHA-256, PDF jelentés.
    - „Megnyitás beszélgetés-nézetben”.
+4. **Melléklet-nézegető** (részletek: `docs/feladatok/melleklet-nezegeto.md`, tervek:
+   `docs/design/melleklet-nezegeto-*.dc.html`):
+   - beépített, biztonságos előnézet: PDF, Word (DOCX; DOC csak LibreOffice-szal), Excel
+     (XLSX/XLS/CSV, rejtett lapokkal és képletekkel), szöveges fájlok, képek (EXIF-fel),
+     csatolt levelek (EML, MSG), tömörített fájlok (ZIP, 7z; RAR telepített 7-Zip-pel)
+     kicsomagolás nélkül, beágyazott fákkal;
+   - ha a gépen van LibreOffice, „Pontos nézet” az Office-fájlokhoz;
+   - semmi nem fut a mellékletből, nincs külső programban megnyitás; csak mentés SHA-256-tal
+     és eredetleírással;
+   - elemzői adatlap: valódi típus és eltérés a megadottól, SHA-256, hely a forrásban,
+     ugyanez a fájl más levelekben, dokumentum-metaadatok, jelzések (rejtett lapok, makró,
+     PDF-JavaScript, GPS);
+   - a mellékletek szövege ügyenként kapcsolhatóan kereshető.
 
 ## Mérföldkövek
 1. [x] Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),
@@ -144,6 +165,9 @@ Forrás lehet:
    tartalmaz; a kitalált adatokkal készült keresési képernyőkép megtalálható a
    `docs/screenshots/` mappában. A projektlicenc kiválasztása a kiadás előtt pótlandó.
 8. Felkészítés a GitHubra (lásd lent), első kiadás.
+9. Melléklet-nézegető a 4. képernyő szerint (`docs/feladatok/melleklet-nezegeto.md`):
+   formátumonkénti előnézet elkülönített, időkorlátos feldolgozással, opcionális LibreOffice,
+   elemzői adatlap, mentés, kapcsolható melléklet-szöveg az FTS-ben.
 
 ## Felkészítés a GitHubra
 Ha a program elkészült (és menet közben is, minden mérföldkőnél), a repó legyen feltölthető

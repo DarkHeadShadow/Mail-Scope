@@ -39,6 +39,49 @@ function formatTimestamp(seconds) {
 }
 
 /**
+ * Build the paperclip icon used for attachments, as inline SVG.
+ */
+function paperclipIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "13");
+  svg.setAttribute("height", "13");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9.2-9.2a3.7 3.7 0 0 1 5.2 5.2l-9.2 9.2a1.8 1.8 0 0 1-2.6-2.6l8.5-8.5");
+  path.setAttribute("fill", "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "2");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  svg.append(path);
+  return svg;
+}
+
+/**
+ * Paperclip and count for a message with attachments; nothing for others.
+ */
+function attachmentBadge(message) {
+  const count = Number(message.attachment_count) || 0;
+  if (count === 0) return null;
+  const names = Array.isArray(message.attachment_names) ? message.attachment_names : [];
+  const listed = names.slice(0, 5).join(", ");
+  const rest = count - Math.min(names.length, 5);
+  const description = `${count} melléklet: ${listed}${rest > 0 ? ` … és még ${rest}` : ""}`;
+  const badge = document.createElement("span");
+  badge.className = "attachment-badge";
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", description);
+  badge.title = description;
+  const number = document.createElement("span");
+  number.textContent = String(count);
+  number.setAttribute("aria-hidden", "true");
+  badge.append(paperclipIcon(), number);
+  return badge;
+}
+
+/**
  * Local calendar day ("YYYY-MM-DD") of a moment, used for timeline grouping.
  */
 function localDay(date) {
@@ -555,6 +598,7 @@ function createSearchGroup(group = { operator: "AND", conditions: [{ field: "tex
  */
 function collectDetailedSearch() {
   return {
+    has_attachment: element("attachment-only-toggle").getAttribute("aria-pressed") === "true",
     operator: element("detailed-search-operator").value,
     groups: [...element("search-groups").querySelectorAll(":scope > .search-group")].map((group) => ({
       operator: group.querySelector(".search-group-heading select").value,
@@ -617,6 +661,9 @@ function renderDetailedResults() {
       open.className = "detailed-result-open";
       const subject = document.createElement("strong");
       subject.textContent = message.subject || "(nincs tárgy)";
+      const badge = attachmentBadge(message);
+      // Before the subject, so an ellipsized long subject cannot hide it.
+      if (badge) subject.prepend(badge);
       const meta = document.createElement("span");
       meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${formatTimestamp(message.sent_timestamp)} · ${message.source_path}`;
       open.append(subject, meta);
@@ -657,6 +704,7 @@ async function runDetailedSearch(offset = 0) {
       body: JSON.stringify({ ...query, limit: 50, offset }),
     });
     state.detailedSearch = query;
+    state.detailedSearchRan = true;
     state.detailedResults = result.results;
     state.detailedTotal = result.total;
     state.detailedOffset = result.offset;
@@ -782,7 +830,7 @@ async function printDetailedSearchReport() {
         .join(` ${group.operator} `))
       .join(` ${query.operator} `);
     summary.textContent =
-      `Találatok: ${firstPage.total.toLocaleString("hu-HU")} · Feltétel: ${criteria}`;
+      `Találatok: ${firstPage.total.toLocaleString("hu-HU")} · Feltétel: ${criteria}${query.has_attachment ? " · csak melléklettel" : ""}`;
     const table = document.createElement("table");
     const head = document.createElement("thead");
     const headerRow = document.createElement("tr");
@@ -1354,6 +1402,8 @@ function renderMessages() {
     const subject = document.createElement("div");
     subject.className = "message-subject";
     subject.textContent = message.subject || "(nincs tárgy)";
+    const badge = attachmentBadge(message);
+    if (badge) subject.prepend(badge);
     const meta = document.createElement("div");
     meta.className = "message-meta";
     const sender = document.createElement("span");
@@ -1638,6 +1688,8 @@ function conversationCard(message, people, personColors) {
   const subject = document.createElement("div");
   subject.className = "message-subject";
   appendHighlightedText(subject, message.subject || "(nincs tárgy)", element("conversation-query").value.trim());
+  const badge = attachmentBadge(message);
+  if (badge) subject.append(badge);
   if (message.thread_key) {
     const thread = document.createElement("span");
     thread.className = "thread-chip";
@@ -1934,6 +1986,22 @@ element("add-condition-button").addEventListener("click", () => {
   }
 });
 element("run-detailed-search-button").addEventListener("click", () => runDetailedSearch());
+
+/**
+ * Switch the whole-query "only with attachments" filter on or off.
+ */
+function setAttachmentOnly(enabled) {
+  const toggle = element("attachment-only-toggle");
+  toggle.setAttribute("aria-pressed", String(enabled));
+  toggle.classList.toggle("active", enabled);
+}
+
+element("attachment-only-toggle").addEventListener("click", () => {
+  const enabled = element("attachment-only-toggle").getAttribute("aria-pressed") !== "true";
+  setAttachmentOnly(enabled);
+  // A toggle re-runs an existing search from its first page.
+  if (state.detailedSearchRan) runDetailedSearch(0);
+});
 element("save-search-button").addEventListener("click", async () => {
   const query = collectDetailedSearch();
   try {
@@ -1967,6 +2035,7 @@ element("saved-search-select").addEventListener("change", async () => {
     element("search-groups").replaceChildren(
       ...groups.map((group) => createSearchGroup(group)),
     );
+    setAttachmentOnly(selected.query.has_attachment === true);
     element("saved-search-name").value = selected.name;
     await runDetailedSearch();
   } catch (error) {

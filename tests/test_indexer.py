@@ -967,6 +967,43 @@ class IndexerTests(unittest.TestCase):
         self.assertIn("anna@pelda.hu", moved.addresses)
         self.assertNotIn("Kézi Anna", by_name())
 
+    def test_attachment_counts_and_attachment_only_filter(self) -> None:
+        """Expose attachment counts and restrict whole queries to mails with attachments."""
+        mailbox = self.case_directory / "attachments.mbox"
+        mailbox.write_bytes(
+            _mail(message_id="<att@example.test>", subject="Mellékletes szerződés",
+                  body="szerződés", attachment=True)
+            + _mail(message_id="<plain@example.test>", subject="Sima szerződés",
+                    body="szerződés")
+            + _mail(message_id="<other@example.test>", subject="Számla",
+                    body="számla")
+        )
+        self.service.index_sources(discover_sources(mailbox))
+
+        rows, _ = self.database.detailed_search(
+            ({"field": "text", "value": "szerződés"},), operator="AND"
+        )
+        counts = {row["subject"]: (row["attachment_count"], row["attachment_names"]) for row in rows}
+        self.assertEqual(counts["Mellékletes szerződés"], (1, "bizonyitek.txt"))
+        self.assertEqual(counts["Sima szerződés"], (0, None))
+        archive = {row["subject"]: row["attachment_count"] for row in self.database.archive_messages()}
+        self.assertEqual(archive["Mellékletes szerződés"], 1)
+        self.assertEqual(archive["Számla"], 0)
+
+        rows, total = self.database.detailed_search(
+            ({"field": "text", "value": "szerződés"},), operator="AND", has_attachment=True
+        )
+        self.assertEqual((total, [row["subject"] for row in rows]), (1, ["Mellékletes szerződés"]))
+        groups = (
+            {"operator": "AND", "conditions": [{"field": "text", "value": "szerződés"}]},
+            {"operator": "AND", "conditions": [{"field": "subject", "value": "Számla"}]},
+        )
+        _, without_filter = self.database.detailed_search(groups, operator="OR")
+        rows, with_filter = self.database.detailed_search(groups, operator="OR", has_attachment=True)
+        self.assertEqual(without_filter, 3)
+        self.assertEqual(with_filter, 1)
+        self.assertEqual(rows[0]["subject"], "Mellékletes szerződés")
+
     def test_migrates_existing_participant_table(self) -> None:
         """Upgrade a prior schema by adding display-name storage safely."""
         legacy_path = self.case_directory / "legacy.sqlite3"

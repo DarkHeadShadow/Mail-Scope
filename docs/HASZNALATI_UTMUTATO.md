@@ -191,6 +191,8 @@ Enterrel indítja.
   gomb hozza a következőket.
 - Minden sor: tárgy, feladó, dátum (`ÉÉÉÉ-HH-NN ÓÓ:PP`, a gép helyi idejében), mappa és forrás.
   A dátum fölé állva az eredeti `Date` fejléc is látszik.
+- Mellékletes levélnél a tárgy előtt gemkapocs és a mellékletek száma látszik; fölé állva
+  a program legfeljebb öt fájlnevet sorol fel („… és még N”).
 
 ### Olvasópanel
 
@@ -273,7 +275,13 @@ a hiányzó levélre hivatkoztat, a program ezeket tárgy szerint külön szála
 | Melléklet típusa | MIME-típus részlete, például `pdf` |
 | Címke | szövegrész a címkében |
 
-A **Keresés** gomb indítja. A találatok 50-esével lapozhatók; az azonos levelek forráspéldányai egy
+A **Keresés** gomb indítja. Mellette a **Csak melléklettel** kapcsológomb (egérrel vagy
+billentyűzettel kapcsolható) az egész lekérdezést a legalább egy melléklettel rendelkező
+levelekre szűkíti – ÉS kapcsolattal, akkor is, ha a csoportok között VAGY áll. Bekapcsolt
+állapotban kiemelt színű; átkapcsoláskor a már lefutott keresés az első oldaltól újra lefut.
+A régi „Melléklet” (`yes`/`no`) feltételmező továbbra is használható.
+
+A találatok 50-esével lapozhatók; mellékletes levélnél gemkapocs és a mellékletek száma látszik; az azonos levelek forráspéldányai egy
 találatként jelennek meg. Egy találatra kattintva a levél az Archívum lapon nyílik meg; a
 **Beszélgetés** gomb a levél feladójával és címzettjével nyitja meg a Beszélgetésnézetet.
 
@@ -289,13 +297,18 @@ nem változnak. A címkékre a „Címke” feltétellel lehet keresni.
 ### Mentett keresések
 
 - **Keresés mentése:** adjon nevet a keresésnek a **Mentett keresés neve** mezőben.
-- **Mentett keresések:** a listából választva a feltételek visszatöltődnek, és a keresés lefut.
+- **Mentett keresések:** a listából választva a feltételek és a „Csak melléklettel” kapcsoló
+  állása visszatöltődik, és a keresés lefut.
 - **Mentés törlése:** a kiválasztott mentett keresés törlése.
 
 ### Export
 
+Minden export (CSV, EML ZIP, PDF) pontosan azt a halmazt adja, amely a képernyőn látszik,
+a „Csak melléklettel” szűréssel együtt.
+
 - **CSV export** – legfeljebb 10 000 találat; Excelben közvetlenül megnyitható (UTF-8), a képletnek
-  látszó értékek semlegesítve.
+  látszó értékek semlegesítve. A „Mellékletek száma” és „Mellékletek neve” (pontosvesszővel
+  elválasztva) oszlop is benne van.
 - **EML ZIP + SHA-256** – legfeljebb 500 levél és 256 MiB.
 - **PDF / nyomtatás** – nyomtatható jelentés legfeljebb 2000 találatról, a feltételekkel és a
   készítés időpontjával.

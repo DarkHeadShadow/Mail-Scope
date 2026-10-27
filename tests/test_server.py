@@ -296,6 +296,80 @@ class ServerTests(unittest.TestCase):
         response.read()
         self.assertEqual(response.status, 400)
 
+    def test_attachment_flag_search_filter_csv_and_saved_search(self) -> None:
+        """Return attachment data, filter with has_attachment, and export it to CSV."""
+        message = EmailMessage()
+        message["From"] = "Teszt Antal <antal@pelda.hu>"
+        message["To"] = "Teszt Anna <anna@pelda.hu>"
+        message["Subject"] = "Mellékletes levél"
+        message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+        message["Message-ID"] = "<att-server@example.test>"
+        message.set_content("Szerződés melléklettel.")
+        for name in ("szerzodes.pdf", "kotber.xlsx"):
+            message.add_attachment(b"kitalalt", maintype="application", subtype="octet-stream", filename=name)
+        self.source_path.write_bytes(
+            self.source_bytes
+            + b"\nFrom sender@example.test Sat Jan  1 00:00:00 2022\n"
+            + message.as_bytes(policy=policy.SMTP)
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        groups = (
+            {"operator": "AND", "conditions": [{"field": "from", "value": "pelda.hu"}]},
+            {"operator": "AND", "conditions": [{"field": "subject", "value": "nincs ilyen"}]},
+        )
+
+        everything = self.application.detailed_search(groups, operator="OR", limit=50, offset=0)
+        only = self.application.detailed_search(
+            groups, operator="OR", limit=50, offset=0, has_attachment=True
+        )
+        self.assertGreater(everything["total"], only["total"])
+        self.assertEqual(only["total"], 1)
+        hit = only["results"][0]
+        self.assertEqual(hit["attachment_count"], 2)
+        self.assertEqual(hit["attachment_names"], ["kotber.xlsx", "szerzodes.pdf"])
+        archive = self.application.archive(
+            query="", source_id=None, folder_id=None, has_attachments=False,
+            deleted_only=False, item_type=None, include_duplicates=False, limit=10, offset=0,
+        )
+        self.assertEqual(
+            sorted(row["attachment_count"] for row in archive), [0] * (len(archive) - 1) + [2]
+        )
+
+        csv_bytes, _, _ = self.application.detailed_search_export(
+            groups, operator="OR", export_format="csv", has_attachment=True
+        )
+        lines = csv_bytes.decode("utf-8-sig").splitlines()
+        self.assertTrue(lines[0].endswith(",Mellékletek száma,Mellékletek neve"))
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[1].endswith(",2,kotber.xlsx; szerzodes.pdf"))
+
+        self.application.save_search("Csak mellékletes", groups, "OR", has_attachment=True)
+        saved = next(s for s in self.application.saved_searches() if s["name"] == "Csak mellékletes")
+        self.assertIs(saved["query"]["has_attachment"], True)
+
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        self.addCleanup(connection.close)
+        headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+        for value, status in ((True, 200), ("igen", 400)):
+            connection.request(
+                "POST",
+                "/api/search",
+                body=json.dumps({"groups": list(groups), "operator": "OR", "has_attachment": value}),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            self.assertEqual(response.status, status)
+        self.assertIn("logikai érték", body["error"])
+
     def test_full_reverification_http_route(self) -> None:
         """Start a full check through the same-origin POST route."""
         source_id = self._index_fixture_source()

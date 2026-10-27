@@ -84,6 +84,8 @@ Minden lapnak saját címe van (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/keres
 
 A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
 
+A mellékletes leveleknél a találatokban, az Archívum listájában és a beszélgetés-idővonalon gemkapocs és a mellékletek száma látszik; fölé állva a program legfeljebb öt fájlnevet sorol fel. A Keresés gomb melletti **Csak melléklettel** kapcsoló az egész lekérdezést a legalább egy melléklettel rendelkező levelekre szűkíti (ÉS kapcsolattal, akkor is, ha a csoportok között VAGY áll). A mentett keresés megőrzi a kapcsoló állását, a CSV, EML ZIP és PDF export pedig ugyanazt a szűrt halmazt adja; a CSV-ben „Mellékletek száma” és „Mellékletek neve” oszlop is van.
+
 ## Ismert korlátozások
 
 - A PST/OST olvasás az opcionális natív `pypff` kötéstől és a libpff képességeitől függ. Sérült vagy nem támogatott Outlook-elemek „hibás” bejegyzésként kerülnek az indexbe; egy sikertelen forrás naplózódik, a többi forrás indexelése folytatódik.

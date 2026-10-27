@@ -84,6 +84,8 @@ Each page has its own address (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kerese
 
 Detailed search supports subject, full-text, sender, recipient, inclusive date boundaries, attachment presence, source path, folder, attachment media type, and label conditions. Conditions may be grouped with AND/OR; groups can also be combined with AND/OR.
 
+Messages with attachments show a paperclip and the number of attachments in the search results, the archive list and the conversation timeline; hovering lists up to five file names. The **Csak melléklettel** toggle next to the search button limits the whole query to messages with at least one attachment (combined with AND, even when the groups are joined with OR). Saved searches keep the toggle, and the CSV, EML ZIP and PDF exports use the same filtered set; the CSV also has “Mellékletek száma” and “Mellékletek neve” columns.
+
 ## Known limitations
 
 - PST/OST parsing depends on the optional native `pypff` binding and its libpff capabilities. Damaged or unsupported Outlook items are indexed as failed entries; a failing source is recorded and the remaining sources are still indexed.

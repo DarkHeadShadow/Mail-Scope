@@ -415,6 +415,7 @@ class MailScopeApplication:
         operator: str,
         limit: int,
         offset: int,
+        has_attachment: bool = False,
     ) -> dict[str, Any]:
         """Run a validated detailed search with pagination and result count."""
         with self._lock:
@@ -424,6 +425,7 @@ class MailScopeApplication:
                 operator=operator,
                 limit=limit,
                 offset=offset,
+                has_attachment=has_attachment,
             )
             return {
                 "results": [_row_json(row) for row in rows],
@@ -438,6 +440,7 @@ class MailScopeApplication:
         *,
         operator: str,
         export_format: str,
+        has_attachment: bool = False,
     ) -> tuple[bytes, str, str]:
         """Export bounded detailed-search hits as CSV or verified original EML files."""
         if export_format not in {"csv", "eml_zip"}:
@@ -448,6 +451,7 @@ class MailScopeApplication:
                 conditions,
                 operator=operator,
                 limit=10001 if export_format == "csv" else 501,
+                has_attachment=has_attachment,
             )
             maximum = 10000 if export_format == "csv" else 500
             if total > maximum:
@@ -470,6 +474,8 @@ class MailScopeApplication:
                         "sha256",
                         "labels",
                         "copy_count",
+                        "Mellékletek száma",
+                        "Mellékletek neve",
                     )
                 )
                 for row in rows:
@@ -494,6 +500,14 @@ class MailScopeApplication:
                             _csv_safe(row["content_hash"]),
                             _csv_safe(row["labels"]),
                             row["copy_count"],
+                            row["attachment_count"],
+                            _csv_safe(
+                                "; ".join(
+                                    database.attachment_names_for_message(
+                                        int(row["message_id"])
+                                    )
+                                )
+                            ),
                         )
                     )
                 return (
@@ -603,11 +617,14 @@ class MailScopeApplication:
         name: str,
         conditions: tuple[dict[str, Any], ...],
         operator: str,
+        has_attachment: bool = False,
     ) -> dict[str, Any]:
         """Validate and store one named flat or grouped detailed-search query."""
         with self._lock:
             database = self._require_case()
-            database.detailed_search(conditions, operator=operator, limit=1)
+            database.detailed_search(
+                conditions, operator=operator, limit=1, has_attachment=has_attachment
+            )
             is_grouped = bool(conditions) and all(
                 "conditions" in condition for condition in conditions
             )
@@ -616,6 +633,7 @@ class MailScopeApplication:
                 {
                     "groups" if is_grouped else "conditions": list(conditions),
                     "operator": operator,
+                    "has_attachment": has_attachment,
                 },
             )
             return {"name": name.strip()}
@@ -1249,6 +1267,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         conditions,
                         operator=operator,
                         export_format=_required_string(payload, "format"),
+                        has_attachment=_payload_boolean(payload, "has_attachment"),
                     )
                 )
                 self.send_response(HTTPStatus.OK.value)
@@ -1272,6 +1291,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     operator=operator,
                     limit=limit,
                     offset=offset,
+                    has_attachment=_payload_boolean(payload, "has_attachment"),
                 )
             elif path == "/api/searches":
                 conditions, operator = self._search_conditions(payload)
@@ -1279,6 +1299,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     _required_string(payload, "name"),
                     conditions,
                     operator,
+                    has_attachment=_payload_boolean(payload, "has_attachment"),
                 )
             elif path.startswith("/api/searches/"):
                 name = unquote(path.removeprefix("/api/searches/"))
@@ -1596,8 +1617,24 @@ def _source_json(source: DiscoveredSource) -> dict[str, Any]:
 
 
 def _row_json(row: sqlite3.Row) -> dict[str, Any]:
-    """Convert a database row to JSON-friendly Python values."""
-    return {key: row[key] for key in row.keys()}
+    """Convert a database row to JSON-friendly Python values.
+
+    ``attachment_names`` arrives as one unit-separator-joined string and is
+    exposed as a list of at most five file names.
+    """
+    result = {key: row[key] for key in row.keys()}
+    if "attachment_names" in result:
+        joined = result["attachment_names"]
+        result["attachment_names"] = joined.split("\x1f") if joined else []
+    return result
+
+
+def _payload_boolean(payload: dict[str, Any], key: str) -> bool:
+    """Read an optional JSON boolean; anything other than true/false is refused."""
+    value = payload.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"A(z) {key} mező logikai érték (true/false) legyen.")
+    return value
 
 
 def _csv_safe(value: Any) -> str:
