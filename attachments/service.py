@@ -204,12 +204,15 @@ def preview(
 
 
 def analysis(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> dict[str, Any]:
-    """Return document metadata and analyst signals (PDF, DOCX, XLSX, XLS)."""
-    if entry["view"] not in {"pdf", "docx", "xlsx", "xls"}:
+    """Return document metadata and analyst signals (PDF, DOCX, XLSX, XLS, OpenDocument)."""
+    kind = entry["view"] if entry["view"] in {"pdf", "docx", "xlsx", "xls"} else None
+    if entry["real_kind"] == "odf" and entry["sha256"]:
+        kind = "odf"
+    if kind is None:
         return {}
     return _cached_json(
         cache, entry["sha256"], "analysis.json",
-        lambda: run_isolated("attachments.render:analyze", data, entry["view"]),
+        lambda: run_isolated("attachments.render:analyze", data, kind),
     )
 
 

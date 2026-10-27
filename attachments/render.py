@@ -258,7 +258,45 @@ def analyze(data: bytes, view: str) -> dict[str, Any]:
         return _analyze_xlsx(data)
     if view == "xls":
         return _analyze_xls(data)
+    if view == "odf":
+        return _analyze_odf(data)
     return {"metadata": {}, "signals": [], "text": None}
+
+
+def _analyze_odf(data: bytes) -> dict[str, Any]:
+    """OpenDocument properties (meta.xml) and macro, event and external-link signals."""
+    import re
+    import zipfile
+
+    metadata: dict[str, str] = {}
+    signals: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = archive.namelist()
+        if "meta.xml" in names:
+            meta = archive.read("meta.xml").decode("utf-8", "replace")
+            for tag, label in (
+                ("dc:title", "Cím"), ("meta:initial-creator", "Szerző"), ("dc:creator", "Utolsó mentő"),
+                ("meta:creation-date", "Létrehozva"), ("dc:date", "Módosítva"), ("meta:generator", "Alkalmazás"),
+            ):
+                found = re.search(rf"<{tag}>([^<]*)</{tag}>", meta)
+                if found and found.group(1).strip():
+                    value = found.group(1).strip()
+                    metadata[label] = value.replace("T", " ")[:16] if tag.endswith("date") else value
+        modules = [
+            name for name in names
+            if name.startswith("Basic/") and name.endswith(".xml") and not name.endswith(("script-lb.xml", "script-lc.xml"))
+        ]
+        scripts = [name for name in names if name.startswith("Scripts/") and not name.endswith("/")]
+        if modules or scripts:
+            signals.append(f"Makrót tartalmaz ({len(modules) + len(scripts)} modul, Basic/Scripts) – a nézet nem futtatja.")
+        content = archive.read("content.xml") if "content.xml" in names else b""
+        events = len(re.findall(rb"<script:event-listener\b", content))
+        if events:
+            signals.append(f"Eseményhez (pl. megnyitáshoz) kötött makró: {events} db.")
+        external = len(re.findall(rb'xlink:href="(?:https?|ftp|file):', content))
+        if external:
+            signals.append(f"Külső hivatkozás: {external} db (az előnézet nem követi).")
+    return {"metadata": metadata, "signals": signals}
 
 
 def _pdf_date(value: str) -> str:

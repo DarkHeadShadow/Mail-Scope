@@ -2,6 +2,7 @@ __author__ = "Bálint Szabolcs"
 
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -289,8 +290,9 @@ class LibreOfficeTests(unittest.TestCase):
         ])
         self.assertEqual([entry["exact"] for entry in entries], [True, True, False, False])
 
-    def test_conversion_runs_headless_with_a_macro_locked_throwaway_profile(self) -> None:
+    def test_conversion_runs_headless_with_the_macro_locked_profile(self) -> None:
         work_dir = self.root / "tmp" / "munka"
+        profile = self.root / "lo"
         seen: dict[str, object] = {}
 
         class FakeProcess:
@@ -298,8 +300,7 @@ class LibreOfficeTests(unittest.TestCase):
 
             def __init__(self, arguments: list[str], **options: object) -> None:
                 seen["arguments"] = arguments
-                seen["options"] = options
-                seen["profile"] = (work_dir / "profile" / "user" / "registrymodifications.xcu").read_text(encoding="utf-8")
+                seen["profile"] = (profile / "user" / "registrymodifications.xcu").read_text(encoding="utf-8")
                 seen["input"] = Path(arguments[-1]).read_bytes()
                 outdir = Path(arguments[arguments.index("--outdir") + 1])
                 (outdir / f"{Path(arguments[-1]).stem}.pdf").write_bytes(b"%PDF-1.7 pontos")
@@ -309,23 +310,41 @@ class LibreOfficeTests(unittest.TestCase):
                 return b"", b""
 
         with mock.patch("subprocess.Popen", FakeProcess):
-            pdf = libreoffice.convert_to_pdf(r"C:\LO\soffice.exe", b"docx-bajtok", "docx", "szamla.pdf", work_dir)
+            pdf = libreoffice.convert_to_pdf(r"C:\LO\soffice.exe", b"docx-bajtok", "docx", "szamla.pdf", work_dir, profile)
         self.assertEqual(pdf, b"%PDF-1.7 pontos")
         arguments = seen["arguments"]
         self.assertEqual(arguments[0], r"C:\LO\soffice.exe")
-        self.assertTrue(arguments[1].startswith("-env:UserInstallation=file:///"))
+        self.assertEqual(arguments[1], f"-env:UserInstallation={profile.resolve().as_uri()}")
         for flag in ("--headless", "--norestore", "--nolockcheck"):
             self.assertIn(flag, arguments)
         self.assertEqual(arguments[arguments.index("--convert-to") + 1], "pdf")
         self.assertTrue(arguments[-1].endswith("dokumentum.docx"))
         self.assertEqual(seen["input"], b"docx-bajtok")
         self.assertEqual(seen["timeout"], 60.0)
-        self.assertIn('oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value>', seen["profile"])
-        self.assertIn('oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value>', seen["profile"])
+        for line in libreoffice._REQUIRED_SETTINGS:
+            self.assertIn(line, seen["profile"])
+        # The document copy is removed; the profile is kept for the next conversion.
         self.assertFalse(work_dir.exists())
+        self.assertTrue(profile.is_dir())
+
+    def test_profile_is_rebuilt_when_the_macro_lock_is_missing(self) -> None:
+        profile = self.root / "lo"
+        settings = profile / "user" / "registrymodifications.xcu"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(libreoffice._PROFILE_SETTINGS.replace("<value>3</value>", "<value>0</value>"), encoding="utf-8")
+        (profile / "user" / "maradek.txt").write_text("régi", encoding="utf-8")
+        libreoffice._prepare_profile(profile)
+        self.assertEqual(settings.read_text(encoding="utf-8"), libreoffice._PROFILE_SETTINGS)
+        self.assertFalse((profile / "user" / "maradek.txt").exists())
+        # An intact profile (LibreOffice adds its own settings) is kept as it is.
+        settings.write_text(libreoffice._PROFILE_SETTINGS.replace("</oor:items>", "<item/></oor:items>"), encoding="utf-8")
+        libreoffice._prepare_profile(profile)
+        self.assertIn("<item/>", settings.read_text(encoding="utf-8"))
+        self.assertEqual(libreoffice.default_profile_dir().parts[-2:], ("Mail-Scope", "lo"))
 
     def test_timeout_kills_libreoffice_and_failure_is_reported(self) -> None:
         work_dir = self.root / "tmp" / "lassu"
+        profile = self.root / "lo"
 
         class HangingProcess:
             pid = 4242
@@ -345,7 +364,7 @@ class LibreOfficeTests(unittest.TestCase):
 
         with mock.patch("subprocess.Popen", HangingProcess), mock.patch("subprocess.run") as run:
             with self.assertRaisesRegex(libreoffice.ConversionError, "időkorlát"):
-                libreoffice.convert_to_pdf("soffice", b"x", "docx", "a.docx", work_dir, timeout=0.1)
+                libreoffice.convert_to_pdf("soffice", b"x", "docx", "a.docx", work_dir, profile, timeout=0.1)
         self.assertTrue(HangingProcess.killed)
         if os.name == "nt":
             self.assertEqual(run.call_args.args[0][:2], ["taskkill", "/PID"])
@@ -362,24 +381,65 @@ class LibreOfficeTests(unittest.TestCase):
 
         with mock.patch("subprocess.Popen", FailingProcess):
             with self.assertRaisesRegex(libreoffice.ConversionError, "could not be loaded"):
-                libreoffice.convert_to_pdf("soffice", b"x", "rtf", "a.rtf", self.root / "tmp" / "hibas")
+                libreoffice.convert_to_pdf("soffice", b"x", "rtf", "a.rtf", self.root / "tmp" / "hibas", profile)
         with self.assertRaises(ValueError):
-            libreoffice.convert_to_pdf("soffice", b"x", "pdf", "a.pdf", self.root / "tmp" / "pdf")
+            libreoffice.convert_to_pdf("soffice", b"x", "pdf", "a.pdf", self.root / "tmp" / "pdf", profile)
+
+    def _open_headless(self, profile: Path, document: Path, marker: Path, seconds: float) -> bool:
+        """Open a document in headless LibreOffice and report whether its on-load macro wrote the marker."""
+        process = subprocess.Popen(
+            [libreoffice.soffice_path(), f"-env:UserInstallation={profile.resolve().as_uri()}",
+             "--headless", "--invisible", "--norestore", "--nolockcheck", str(document)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=dict(os.environ, MAILSCOPE_MACRO_MARKER=str(marker)),
+        )
+        try:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline and not marker.exists():
+                time.sleep(0.5)
+            return marker.exists()
+        finally:
+            libreoffice._kill_tree(process)
 
     @unittest.skipUnless(libreoffice.soffice_path(), "LibreOffice is not installed")
     def test_real_libreoffice_draws_documents_without_running_macros(self) -> None:
-        marker = self.root / "makro-lefutott.txt"
+        # Short folders: LibreOffice's profile files are up to ~170 characters deep.
+        short = Path(tempfile.mkdtemp(prefix="ms"))
+        self.addCleanup(shutil.rmtree, short, True)
+        document = short / "makro.odt"
+        document.write_bytes(self.fixture("macro-onload.odt"))
+
+        # Control: with macros allowed the fixture's on-load macro does run.
+        allowed = short / "nyitott"
+        (allowed / "user").mkdir(parents=True)
+        (allowed / "user" / "registrymodifications.xcu").write_text(
+            libreoffice._PROFILE_SETTINGS.replace("<value>3</value>", "<value>0</value>").replace(
+                "<value>true</value>", "<value>false</value>"),
+            encoding="utf-8",
+        )
+        self.assertTrue(self._open_headless(allowed, document, short / "kontroll.txt", 90),
+                        "control: the fixture's macro did not run even with macros allowed")
+
+        # Mail-Scope's profile blocks it even when the document is opened, not just converted.
+        locked = short / "lo"
+        libreoffice._prepare_profile(locked)
+        self.assertFalse(self._open_headless(locked, document, short / "zarolt.txt", 45),
+                         "the macro ran with Mail-Scope's macro-locked profile")
+
+        marker = short / "atalakitas.txt"
         with mock.patch.dict(os.environ, {"MAILSCOPE_MACRO_MARKER": str(marker)}):
             pdf = libreoffice.convert_to_pdf(
-                libreoffice.soffice_path(), self.fixture("macro-onload.odt"), "odf", "makro.odt", self.root / "tmp" / "odt"
+                libreoffice.soffice_path(), self.fixture("macro-onload.odt"), "odf", "makro.odt", short / "w1", locked
+            )
+            docm = libreoffice.convert_to_pdf(
+                libreoffice.soffice_path(), self.fixture("macro.docm"), "docx", "macro.docm", short / "w2", locked
             )
         self.assertTrue(pdf.startswith(b"%PDF"))
         self.assertIn("Kitalalt dokumentum", render.render_pdf(pdf)["text"])
         self.assertFalse(marker.exists(), "the document's Basic macro ran during conversion")
-        docm = libreoffice.convert_to_pdf(
-            libreoffice.soffice_path(), self.fixture("macro.docm"), "docx", "macro.docm", self.root / "tmp" / "docm"
-        )
         self.assertTrue(docm.startswith(b"%PDF"))
+        for line in libreoffice._REQUIRED_SETTINGS:
+            self.assertIn(line, (locked / "user" / "registrymodifications.xcu").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

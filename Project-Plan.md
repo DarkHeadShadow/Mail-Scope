@@ -153,10 +153,12 @@ Forrás lehet:
       kibontás a memóriában, ZIP-bomba-védelem (5 szint, 10 000 bejegyzés, 2 GB, 100:1),
       munkamenetig élő jelszó, a beágyazott gyanús fájl a levél jelzésében is.
    4. [x] LibreOffice „Pontos nézet” (telepített LibreOffice, nem csomagoljuk): PDF-be alakítás
-      eldobható, makrótiltó profillal, 60 s időkorláttal, a `.mailscope\tmp\` alatt; az eredmény
+      makrótiltó saját profillal (`%LOCALAPPDATA%\Mail-Scope\lo`, rövid út a Windows
+      úthossz-korlátja miatt), 60 s időkorláttal, a másolat a `.mailscope\tmp\` alatt; az eredmény
       a PDF-nézőben, gyorsítótárazva. DOC/PPT/PPTX/RTF/ODF alapból így nyílik. A
       `soffice.exe` helye kiválasztható (felhasználói `settings.json`). A valódi
-      LibreOffice-teszt (makrós ODT) kihagyódik, ha nincs LibreOffice a gépen.
+      LibreOffice-teszt (makrós ODT, pozitív kontrollal) LibreOffice 26.2.6-tal lefutott; a
+      CI-ben kihagyódik, ha nincs LibreOffice a gépen.
    5. [ ] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható.
 
 ## Mérföldkövek

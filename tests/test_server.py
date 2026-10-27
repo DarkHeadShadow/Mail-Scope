@@ -785,6 +785,9 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(listing["exact_available"])
         self.assertEqual([item["exact"] for item in listing["attachments"]], [True, True, False])
         self.assertEqual(listing["attachments"][1]["view"], "none")
+        odt_info = json.loads(get(f"/api/attachments/{message_id}/1/info")[1])
+        self.assertTrue(any(signal.startswith("Makrót tartalmaz (1 modul") for signal in odt_info["document_signals"]))
+        self.assertTrue(any("megnyitáshoz" in signal for signal in odt_info["document_signals"]))
         self.assertEqual(status, 409)
         self.assertIn("LibreOffice", json.loads(body)["error"])
 

@@ -429,11 +429,15 @@ OpenDocument, RTF, régi DOC/XLS/PPT) az előnézet fölött két gomb jelenik m
 - **Beépített nézet nélküli formátumok** (régi DOC és PPT, RTF, PPTX, OpenDocument) a Pontos
   nézetben nyílnak meg, ha van LibreOffice. LibreOffice nélkül ezeknél az adatlap és a mentés
   érhető el.
-- **Biztonság:** a LibreOffice ablak nélkül fut, minden átalakításhoz saját, eldobható
-  beállításokkal, amelyekben a makrók le vannak tiltva, így a dokumentum makrói nem futnak
-  le. Az ideiglenes fájlok az ügy `.mailscope\tmp\` mappájába kerülnek, és az
-  átalakítás után törlődnek. Az eredmény-PDF a gyorsítótárba kerül, így a második megnyitás
+- **Biztonság:** a LibreOffice ablak nélkül fut, a Mail-Scope saját LibreOffice-beállításaival
+  (`%LOCALAPPDATA%\Mail-Scope\lo`), amelyekben a makrók le vannak tiltva. A dokumentum makrói
+  így nem futnak le, és a gépen lévő LibreOffice saját beállításait a program nem érinti. A
+  program minden átalakítás előtt ellenőrzi a makrótiltást, és ha hiányzik, a beállításokat
+  újra létrehozza. A dokumentum másolata az ügy `.mailscope\tmp\` mappájába kerül, és az
+  átalakítás után törlődik. Az eredmény-PDF a gyorsítótárba kerül, így a második megnyitás
   azonnali.
+- **Időtartam:** az első átalakítás kb. 20 másodperc (ekkor készülnek el a LibreOffice
+  beállításai), a többi néhány másodperc. Egyszerre egy átalakítás fut.
 - **Időkorlát:** egy átalakítás legfeljebb 60 másodpercig tarthat; utána a program leállítja a
   LibreOffice-t, és hibaüzenetet ad. A Beépített nézet ekkor is elérhető.
 - **Hol keresi a program:** `C:\Program Files\LibreOffice\program\soffice.exe`, az x86-os
