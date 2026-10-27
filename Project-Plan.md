@@ -141,7 +141,13 @@ Forrás lehet:
       mentés `.sha256`-tal és eredetleírással, „Összes mentése” ZIP + `MANIFEST.txt`;
       billentyűk (`Esc`, `←`/`→`, `Ctrl+F`, `+`/`−`); megnyitás az olvasópanelből, a
       beszélgetés-buborékokból és a keresési találatokból.
-   2. [ ] PDF, DOCX, XLSX/XLS, homokozott HTML-előnézet (`frame-src 'self'`).
+   2. [x] PDF (`pypdfium2`: oldalképek, szövegréteg, keresés oldalak között, metaadatok,
+      JavaScript/beágyazott fájl/űrlap/aláírás/külső hivatkozás jelzése), DOCX (`mammoth`,
+      `nh3`-mal tisztítva, homokozott iframe-ben, szövegnézettel), XLSX/XLSM (`openpyxl`:
+      munkalapfülek, rejtett és nagyon rejtett lapok, rejtett sorok/oszlopok, képletsor,
+      képletek/értékek, megjegyzések, makró és külső hivatkozás jelzése), XLS (`xlrd`),
+      tisztított HTML homokozott nézettel; a fő CSP egyetlen bővítése `frame-src 'self'`.
+      Kitalált mintafájlok: `tests/fixtures/attachments/` (generálószkripttel).
    3. [ ] Archívumok (ZIP, 7z, RAR) és csatolt levelek (EML, MSG) beágyazott fával,
       ZIP-bomba-védelem, jelszó.
    4. [ ] LibreOffice „Pontos nézet”.

@@ -44,7 +44,15 @@ from sources.discover import (
 from sources.reader_factory import open_source
 from version import __version__
 from attachments.sandbox import AttachmentProcessingError
-from attachments.service import PreviewCache, describe, image_png, preview as attachment_preview
+from attachments.service import (
+    PreviewCache,
+    analysis as attachment_analysis,
+    describe,
+    document_html,
+    extracted_text,
+    image_png,
+    preview as attachment_preview,
+)
 
 from .applog import application_log_path, attach_case_log
 
@@ -67,6 +75,11 @@ _UI_FILES = {
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
 }
 _MAX_RECENT_CASES = 5
+# The sandboxed document view: no scripts, no external loads, styles allowed.
+_DOCUMENT_CSP = (
+    "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
+    "frame-ancestors 'self'"
+)
 VERIFICATION_MODES = {"signature", "full"}
 _VERIFICATION_MODE_KEY = "verification_mode"
 _MAX_REQUEST_BYTES = 1_000_000
@@ -1029,35 +1042,72 @@ class MailScopeApplication:
             }
             for row in loaded["database"].attachments_with_hash(entry["sha256"], message_id)
         ]
+        details: dict[str, Any] = {}
+        try:
+            details = attachment_analysis(PreviewCache(self._require_case_directory()), entry, loaded["data"][int(path)])
+        except AttachmentProcessingError as error:
+            logger.warning("Attachment analysis failed: message %s/%s: %s", message_id, path, error)
+            details = {"analysis_error": str(error)}
         return {
             **entry,
             "location": f"{loaded['location']} › {int(path) + 1}. melléklet",
             "message": loaded["summary"],
             "same_elsewhere": elsewhere,
+            "metadata": details.get("metadata", {}),
+            "document_signals": details.get("signals", []),
+            "security": details.get("security", {}),
+            "text_layer": details.get("text_layer"),
+            "analysis_error": details.get("analysis_error"),
         }
 
-    def attachment_preview(self, message_id: int, path: str, page: int) -> dict[str, Any]:
+    def attachment_preview(
+        self, message_id: int, path: str, page: int, sheet: int = 0
+    ) -> dict[str, Any]:
         """Render or fetch the cached preview of one attachment in the isolated worker."""
         loaded, entry, data = self._attachment(message_id, path)
         cache = PreviewCache(self._require_case_directory())
         try:
-            result = attachment_preview(cache, entry, data, page)
+            result = attachment_preview(cache, entry, data, page, sheet)
         except AttachmentProcessingError as error:
             logger.warning("Attachment preview failed: message %s/%s: %s", message_id, path, error)
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
-        if result.get("kind") == "image":
+        if result.get("kind") in {"image", "pdf"}:
             result["image_url"] = (
                 f"/api/attachments/{message_id}/{path}/image?page={result['page']}"
             )
+        if result.get("formatted"):
+            result["document_url"] = f"/api/attachments/{message_id}/{path}/document"
         return result
 
     def attachment_image(self, message_id: int, path: str, page: int) -> bytes:
-        """Return the re-encoded PNG of an image attachment page."""
+        """Return the re-encoded PNG of an image attachment or a rendered PDF page."""
         _, entry, data = self._attachment(message_id, path)
         try:
             return image_png(PreviewCache(self._require_case_directory()), entry, data, page)
         except AttachmentProcessingError as error:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        except ValueError as error:
+            raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from error
+
+    def attachment_document(self, message_id: int, path: str) -> bytes:
+        """Return the sanitized HTML of a DOCX or HTML attachment for the sandboxed view."""
+        _, entry, data = self._attachment(message_id, path)
+        try:
+            return document_html(PreviewCache(self._require_case_directory()), entry, data)
+        except AttachmentProcessingError as error:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        except ValueError as error:
+            raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from error
+
+    def attachment_text(self, message_id: int, path: str) -> dict[str, Any]:
+        """Return the extracted text of an attachment (per page for PDF)."""
+        _, entry, data = self._attachment(message_id, path)
+        try:
+            return extracted_text(PreviewCache(self._require_case_directory()), entry, data)
+        except AttachmentProcessingError as error:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        except ValueError as error:
+            raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from error
 
     def save_attachment(self, message_id: int, path: str) -> dict[str, Any]:
         """Save one attachment with a .sha256 file and a provenance note, then log it."""
@@ -1429,16 +1479,28 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.OK,
                     self.server.application.message_attachments(int(match.group(1))),
                 )
-            elif match := re.fullmatch(r"/api/attachments/(\d+)/(\d+)/(info|preview|image)", request.path):
+            elif match := re.fullmatch(
+                r"/api/attachments/(\d+)/(\d+)/(info|preview|image|document|text)", request.path
+            ):
                 message_id, path, action = int(match.group(1)), match.group(2), match.group(3)
                 query = parse_qs(request.query)
-                page = _optional_integer(query, "page") or 0 if action != "info" else 0
+                page = _optional_integer(query, "page") or 0
+                sheet = _optional_integer(query, "sheet") or 0
                 if action == "info":
                     self._send_json(HTTPStatus.OK, self.server.application.attachment_info(message_id, path))
                 elif action == "preview":
                     self._send_json(
                         HTTPStatus.OK,
-                        self.server.application.attachment_preview(message_id, path, page),
+                        self.server.application.attachment_preview(message_id, path, page, sheet),
+                    )
+                elif action == "text":
+                    self._send_json(HTTPStatus.OK, self.server.application.attachment_text(message_id, path))
+                elif action == "document":
+                    self._send_bytes(
+                        HTTPStatus.OK,
+                        self.server.application.attachment_document(message_id, path),
+                        "text/html; charset=utf-8",
+                        csp=_DOCUMENT_CSP,
                     )
                 else:
                     self._send_bytes(
@@ -1781,7 +1843,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         """Return an explicit and consistently shaped API error."""
         self._send_json(status, {"error": message})
 
-    def _send_bytes(self, status: HTTPStatus, content: bytes, content_type: str) -> None:
+    def _send_bytes(
+        self, status: HTTPStatus, content: bytes, content_type: str, *, csp: str | None = None
+    ) -> None:
         """Write a bounded response with browser security headers."""
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
@@ -1791,9 +1855,12 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
-            "base-uri 'none'; frame-ancestors 'none'",
+            csp
+            or (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; frame-src 'self'"
+            ),
         )
         self.end_headers()
         self.wfile.write(content)

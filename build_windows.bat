@@ -29,6 +29,9 @@ call ".venv\Scripts\python.exe" -m PyInstaller ^
     --add-data "LICENSES\NOTICE_libpff.txt;LICENSES" ^
     --add-data "THIRD_PARTY_NOTICES.md;." ^
     --collect-all pypff ^
+    --collect-all pypdfium2 ^
+    --collect-all pypdfium2_raw ^
+    --collect-all nh3 ^
     run_mailscope.py
 if errorlevel 1 exit /b 1
 

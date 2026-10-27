@@ -3,3 +3,11 @@
 libpff-python-windows==20231205
 # Image previews in the attachment viewer (re-encoded to PNG, EXIF/GPS).
 Pillow==12.3.0
+# Attachment viewer, stage 2: PDF pages, DOCX, XLSX/XLS and HTML sanitizing.
+pypdfium2==5.13.0
+mammoth==1.12.2
+cobble==0.1.4
+openpyxl==3.1.5
+et-xmlfile==2.0.0
+xlrd==2.0.2
+nh3==0.3.6

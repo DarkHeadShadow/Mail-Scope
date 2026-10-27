@@ -182,8 +182,18 @@ def detect(data: bytes, filename: str = "", declared_type: str = "") -> TypeInfo
         view = "none"
     elif kind in IMAGE_KINDS:
         view = "image"
+    elif kind == "pdf":
+        view = "pdf"
+    elif kind == "docx":
+        view = "docx"
+    elif kind == "xlsx":
+        view = "xlsx"
+    elif kind == "ole" and ext in {"xls", "xlt"}:
+        view = "xls"
     elif ext in {"csv", "tsv"} and kind == "text":
         view = "table"
+    elif kind == "text" and (ext in {"html", "htm"} or head.lstrip()[:200].lower().startswith((b"<!doctype html", b"<html"))):
+        view = "html"
     elif kind in {"text", "email"}:
         view = "text"
     else:

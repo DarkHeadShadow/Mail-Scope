@@ -474,6 +474,90 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(archive.read("abra.png"), files[0][3])
         self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
 
+    def test_document_attachments_over_http(self) -> None:
+        """PDF pages, sandboxed DOCX/HTML documents, sheets, text and metadata."""
+        fixtures = Path(__file__).parent / "fixtures" / "attachments"
+        message = EmailMessage()
+        message["From"] = "Teszt Antal <antal@pelda.hu>"
+        message["To"] = "Teszt Anna <anna@pelda.hu>"
+        message["Subject"] = "Dokumentumok"
+        message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+        message["Message-ID"] = "<docs@example.test>"
+        message.set_content("Csatolva.")
+        for name, maintype, subtype in (
+            ("sample.pdf", "application", "pdf"),
+            ("sample.docx", "application", "vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            ("sample.xlsx", "application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            ("page.html", "text", "html"),
+            ("javascript.pdf", "application", "pdf"),
+        ):
+            message.add_attachment((fixtures / name).read_bytes(), maintype=maintype, subtype=subtype, filename=name)
+        self.source_path.write_bytes(
+            b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + message.as_bytes(policy=policy.SMTP)
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        message_id = int(
+            self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=True,
+                deleted_only=False, item_type=None, include_duplicates=False, limit=5, offset=0,
+            )[0]["message_id"]
+        )
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+
+        def get(path: str) -> tuple[int, dict, bytes]:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            body = response.read()
+            connection.close()
+            return response.status, dict(response.getheaders()), body
+
+        listing = json.loads(get(f"/api/messages/{message_id}/attachments")[2])
+        self.assertEqual(
+            [item["view"] for item in listing["attachments"]], ["pdf", "docx", "xlsx", "html", "pdf"]
+        )
+        pdf = json.loads(get(f"/api/attachments/{message_id}/0/preview?page=1")[2])
+        self.assertEqual((pdf["kind"], pdf["page"], pdf["pages"]), ("pdf", 1, 2))
+        status, headers, png = get(pdf["image_url"])
+        self.assertEqual((status, headers["Content-Type"]), (200, "image/png"))
+        self.assertTrue(png.startswith(b"\x89PNG"))
+        pages = json.loads(get(f"/api/attachments/{message_id}/0/text")[2])["pages"]
+        self.assertEqual(len(pages), 2)
+        info = json.loads(get(f"/api/attachments/{message_id}/0/info")[2])
+        self.assertEqual(info["metadata"]["Szerző"], "Teszt Anna")
+        self.assertEqual(info["security"]["Beágyazott JavaScript"], "nincs")
+        scripted = json.loads(get(f"/api/attachments/{message_id}/4/info")[2])
+        self.assertEqual(scripted["security"]["Beágyazott JavaScript"], "van")
+
+        docx = json.loads(get(f"/api/attachments/{message_id}/1/preview")[2])
+        self.assertTrue(docx["formatted"])
+        status, headers, document = get(docx["document_url"])
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            headers["Content-Security-Policy"],
+            "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'",
+        )
+        self.assertIn("Fizetési ütemezés".encode("utf-8"), document)
+        html_preview = json.loads(get(f"/api/attachments/{message_id}/3/preview")[2])
+        _, _, html_document = get(html_preview["document_url"])
+        self.assertNotIn(b"<script", html_document)
+        self.assertIn("Kedves Teszt Anna", html_preview["text"])
+
+        sheet = json.loads(get(f"/api/attachments/{message_id}/2/preview?sheet=1")[2])
+        self.assertEqual((sheet["kind"], sheet["sheet"], sheet["rows"]), ("sheet", 1, [["rejtett adat"]]))
+        xlsx_info = json.loads(get(f"/api/attachments/{message_id}/2/info")[2])
+        self.assertTrue(any("Rejtett munkalap" in s for s in xlsx_info["document_signals"]))
+        status, headers, _ = get("/")
+        self.assertIn("frame-src 'self'", headers["Content-Security-Policy"])
+        self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
+
     def test_full_reverification_http_route(self) -> None:
         """Start a full check through the same-origin POST route."""
         source_id = self._index_fixture_source()
@@ -951,6 +1035,10 @@ class ServerTests(unittest.TestCase):
                 json.loads(response.read()),
                 {"stopping": True, "indexing_was_running": True},
             )
+            # The handler answers first and requests the shutdown afterwards.
+            deadline = time.monotonic() + 2
+            while not request_shutdown.called and time.monotonic() < deadline:
+                time.sleep(0.01)
             request_shutdown.assert_called_once_with()
 
     def test_shutdown_endpoint_stops_the_local_server(self) -> None:

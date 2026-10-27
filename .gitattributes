@@ -1,0 +1,10 @@
+# Test fixtures are byte-exact samples; never convert their line endings.
+tests/fixtures/** -text
+*.pdf binary
+*.docx binary
+*.docm binary
+*.xlsx binary
+*.xlsm binary
+*.xls binary
+*.png binary
+*.jpg binary

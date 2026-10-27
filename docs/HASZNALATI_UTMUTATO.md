@@ -392,7 +392,7 @@ is működik.
 - **Középen:** az előnézet.
 - **Jobb oldalt:** az elemzői adatlap.
 
-### Előnézetek (1. szakasz)
+### Előnézetek
 
 | Típus | Megjelenítés |
 | --- | --- |
@@ -400,11 +400,20 @@ is működik.
 | HTML | tisztított, látható szöveg; a **Forrás** gombbal a HTML-forrás |
 | CSV | táblázat elválasztó-felismeréssel, 2000 soros oldalakkal |
 | Képek (JPG, PNG, GIF, BMP, WEBP, TIFF) | a kép PNG-be újrakódolva, nagyítással; többoldalas TIFF-nél oldalléptetés; EXIF-adatok, a GPS-koordináta szövegként |
+| PDF | oldalkép nagyítással és oldalléptetéssel; az oldal szövegrétege kiemeléssel; a keresés az összes oldalt átnézi („Találat: 2., 5. oldal”); szövegréteg nélküli (szkennelt) PDF-nél jelzés: OCR nélkül nem kinyerhető |
+| Word (DOCX, DOCM) | **Formázott** fül: címsorok, listák, táblázatok, képek tisztított, homokozott keretben; **Szöveg** fül a kereséshez |
+| Excel (XLSX, XLSM) | munkalapfülek (a rejtett és nagyon rejtett lapok is, jelölve), képletsor a kijelölt cellához, **Képletek** kapcsoló, a rejtett sorok és oszlopok halványan, csíkozva, a megjegyzéses cellák sarokjellel |
+| Régi Excel (XLS) | munkalapok értékekkel (képletek nélkül) |
+| HTML | **Formázott** fül tisztítva, homokozott keretben; **Szöveg** és **Forrás** fül |
 | Futtatható fájl (EXE, DLL, MSI, BAT, PS1, JS, VBS, LNK…) | előnézet nincs, csak adatlap és mentés |
 
-A PDF, a Word és az Excel beépített nézete, a tömörített fájlok és a csatolt levelek kibontása,
-valamint a LibreOffice-os „Pontos nézet” a következő szakaszokban készül el. Addig ezeknél az
-adatlap és a mentés érhető el.
+A formázott (Word, HTML) nézet egy elkülönített, homokozott keretben jelenik meg: szkript, űrlap,
+navigáció és külső tartalom nem működik benne, a linkek célja eltávolítva. Kereséskor a program
+az előnézetet a **Szöveg** fülre váltja.
+
+A tömörített fájlok és a csatolt levelek kibontása, a régi DOC/PPT/RTF megjelenítése és a
+LibreOffice-os „Pontos nézet” a következő szakaszokban készül el. Addig ezeknél az adatlap és a
+mentés érhető el.
 
 Legfeljebb 200 MB-os mellékletnél van előnézet; a szövegnézet az első 5 MB-ot mutatja.
 
@@ -412,10 +421,15 @@ Legfeljebb 200 MB-os mellékletnél van előnézet; a szövegnézet az első 5 M
 
 - **Fájl:** név, méret, megadott típus, a **tartalom alapján felismert valódi típus** (egyezik /
   ELTÉR), SHA-256, hely a forrásban (forrásfájl › mappa › levél › melléklet).
+- **Dokumentum-metaadatok:** szerző, utolsó mentő, cím, létrehozás és módosítás ideje, készítő
+  program, oldalak / munkalapok, képletek és megjegyzések száma.
+- **Biztonság (PDF):** beágyazott JavaScript, beágyazott fájl, űrlapmezők, digitális aláírás
+  (csak jelenlét, az aláírást a program nem ellenőrzi), külső hivatkozás.
 - **Képadatok:** méret, EXIF-adatok, GPS-koordináta.
 - **Elemzői jelzések:** például futtatható fájl, kettős kiterjesztés (`fizetes_reszletek.pdf.exe`),
   a névtől vagy a megadott típustól eltérő tartalom (PDF-nek nevezett ZIP, PDF-nek álcázott
-  program), GPS-helyadat.
+  program), makró (`vbaProject.bin`), rejtett és nagyon rejtett munkalap, rejtett sorok és
+  oszlopok, külső hivatkozás, beágyazott objektum, GPS-helyadat.
 - **Ugyanez a fájl máshol:** más levelek ugyanilyen SHA-256-ú mellékletei. A program a már
   megnyitott mellékletek hash-ét ismeri; a lista a mellékletek nézegetésével bővül.
 

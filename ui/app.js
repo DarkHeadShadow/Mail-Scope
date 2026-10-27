@@ -2126,8 +2126,18 @@ element("export-search-pdf-button").addEventListener("click", printDetailedSearc
  * Open the attachment viewer for a message, at an index or a file name.
  */
 function openAttachmentViewer(messageId, target = {}) {
-  state.viewerPreferredName = target.name || null;
-  window.location.hash = `#/melleklet/${messageId}/${Number.isInteger(target.index) ? target.index : 0}`;
+  let index = Number.isInteger(target.index) ? target.index : 0;
+  state.viewerPreferredName = null;
+  if (target.name) {
+    // With this message's list already loaded the name resolves at once;
+    // otherwise loadViewer resolves it after fetching the list.
+    if (state.viewer && state.viewer.messageId === messageId) {
+      index = Math.max(0, state.viewer.attachments.findIndex((item) => item.name === target.name));
+    } else {
+      state.viewerPreferredName = target.name;
+    }
+  }
+  window.location.hash = `#/melleklet/${messageId}/${index}`;
 }
 
 /**
@@ -2171,7 +2181,12 @@ async function loadViewer() {
     if (viewer.path !== path) {
       viewer.path = path;
       viewer.page = 0;
+      viewer.sheet = 0;
       viewer.zoom = 100;
+      viewer.tab = null;
+      viewer.cell = null;
+      viewer.showFormulas = false;
+      viewer.pdfText = null;
     }
     renderViewerTree();
     const entry = viewer.attachments[Number(path)] || viewer.attachments[0];
@@ -2183,7 +2198,7 @@ async function loadViewer() {
     const [info, preview] = await Promise.all([
       requestJson(`/api/attachments/${viewer.messageId}/${path}/info`),
       // For types without a preview the server only explains why; nothing is rendered.
-      requestJson(`/api/attachments/${viewer.messageId}/${path}/preview?page=${viewer.page}`)
+      requestJson(`/api/attachments/${viewer.messageId}/${path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}`)
         .catch((error) => ({ kind: "error", reason: error.message })),
     ]);
     viewer.preview = preview || { kind: "none", reason: "" };
@@ -2273,6 +2288,19 @@ function renderViewerSheet(info) {
   row(file, "SHA-256", info.sha256, "mono");
   row(file, "Hely", info.location);
 
+  if (info.metadata && Object.keys(info.metadata).length) {
+    const block = section("Dokumentum-metaadatok");
+    Object.entries(info.metadata).forEach(([key, value]) => row(block, key, value));
+  }
+  if (info.security && Object.keys(info.security).length) {
+    const block = section("Biztonság");
+    Object.entries(info.security).forEach(([key, value]) => row(block, key, value, value === "van" ? "error" : "ok"));
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "Az előnézet nem futtat kódot, és nem tölt be semmit az internetről.";
+    block.append(note);
+  }
+
   if (state.viewer.preview && state.viewer.preview.kind === "image") {
     const image = state.viewer.preview;
     const block = section("Képadatok");
@@ -2282,10 +2310,12 @@ function renderViewerSheet(info) {
   }
 
   const signals = section("Elemzői jelzések");
-  if (info.warnings.length === 0) {
+  const allSignals = [...info.warnings, ...(info.document_signals || [])];
+  if (info.analysis_error) allSignals.push(`A dokumentum elemzése nem sikerült: ${info.analysis_error}`);
+  if (allSignals.length === 0) {
     row(signals, "Figyelmeztetés", "nincs");
   } else {
-    info.warnings.forEach((warning) => {
+    allSignals.forEach((warning) => {
       const line = document.createElement("p");
       line.className = "viewer-warning";
       line.textContent = warning;
@@ -2336,37 +2366,14 @@ function renderViewerPreview(entry, info) {
     return;
   }
   const query = element("viewer-search").value.trim();
-  if (preview.kind === "text") {
-    const toolbar = document.createElement("div");
-    toolbar.className = "viewer-text-toolbar";
-    const meta = document.createElement("span");
-    meta.className = "muted";
-    meta.textContent = `Kódolás: ${preview.encoding}${preview.truncated ? " · csak az első 5 MB látszik; a teljes szöveghez mentse a fájlt" : ""}`;
-    toolbar.append(meta);
-    let showSource = Boolean(viewer.showSource && preview.source);
-    if (preview.source) {
-      const toggle = document.createElement("button");
-      toggle.type = "button";
-      toggle.className = "button quiet";
-      toggle.textContent = showSource ? "Tisztított nézet" : "Forrás";
-      toggle.addEventListener("click", () => {
-        viewer.showSource = !showSource;
-        renderViewerPreview(entry, info);
-      });
-      toolbar.append(toggle);
-    }
-    const pre = document.createElement("pre");
-    pre.className = "viewer-text";
-    pre.style.fontSize = `${Math.round(11 * viewer.zoom / 100)}px`;
-    const lines = (showSource ? preview.source : preview.text).split("\n");
-    lines.forEach((line, index) => {
-      const number = document.createElement("span");
-      number.className = "line-number";
-      number.textContent = String(index + 1).padStart(4, " ");
-      pre.append(number);
-      appendHighlightedText(pre, `${line}\n`, query);
-    });
-    area.append(toolbar, pre);
+  if (preview.kind === "pdf") {
+    renderPdfPreview(area, entry, preview, query);
+  } else if (preview.kind === "sheet") {
+    renderSheetPreview(area, preview, query);
+  } else if (preview.formatted) {
+    renderFormattedPreview(area, entry, preview, query);
+  } else if (preview.kind === "text") {
+    area.append(textToolbar(preview), textBlock(preview.text, query));
   } else if (preview.kind === "table") {
     const meta = document.createElement("p");
     meta.className = "muted";
@@ -2408,6 +2415,248 @@ function renderViewerPreview(entry, info) {
 }
 
 /**
+ * Encoding note and, for HTML, the cleaned/source switch above a text preview.
+ */
+function textToolbar(preview) {
+  const toolbar = document.createElement("div");
+  toolbar.className = "viewer-text-toolbar";
+  const meta = document.createElement("span");
+  meta.className = "muted";
+  meta.textContent = preview.encoding
+    ? `Kódolás: ${preview.encoding}${preview.truncated ? " · csak az első 5 MB látszik; a teljes szöveghez mentse a fájlt" : ""}`
+    : (preview.truncated ? "Csak az első 2 MB szöveg látszik; a teljes szöveghez mentse a fájlt." : "");
+  toolbar.append(meta);
+  return toolbar;
+}
+
+/**
+ * Text with line numbers and search highlighting.
+ */
+function textBlock(text, query) {
+  const pre = document.createElement("pre");
+  pre.className = "viewer-text";
+  pre.style.fontSize = `${Math.round(11 * state.viewer.zoom / 100)}px`;
+  (text || "").split("\n").forEach((line, index) => {
+    const number = document.createElement("span");
+    number.className = "line-number";
+    number.textContent = String(index + 1).padStart(4, " ");
+    pre.append(number);
+    appendHighlightedText(pre, `${line}\n`, query);
+  });
+  return pre;
+}
+
+/**
+ * Tabs for formatted (sandboxed iframe), plain text and, for HTML, source views.
+ */
+function renderFormattedPreview(area, entry, preview, query) {
+  const viewer = state.viewer;
+  const tabs = [["formatted", "Formázott"], ["text", "Szöveg"]];
+  if (preview.source) tabs.push(["source", "Forrás"]);
+  // A search switches to the text view: the sandboxed document cannot be highlighted.
+  let tab = viewer.tab || "formatted";
+  if (query && tab === "formatted") tab = "text";
+  const bar = document.createElement("div");
+  bar.className = "viewer-tabs";
+  bar.setAttribute("role", "tablist");
+  tabs.forEach(([key, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "viewer-tab";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(key === tab));
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      viewer.tab = key;
+      if (key === "formatted") element("viewer-search").value = "";
+      renderViewerPreview(entry, { warnings: entry.warnings });
+    });
+    bar.append(button);
+  });
+  area.append(bar);
+  if (tab === "formatted") {
+    const frame = document.createElement("iframe");
+    // Empty sandbox: no scripts, no forms, no navigation, unique origin.
+    frame.setAttribute("sandbox", "");
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    frame.className = "viewer-frame";
+    frame.title = `${entry.name} – formázott, biztonságos nézet`;
+    frame.src = preview.document_url;
+    frame.style.zoom = String(viewer.zoom / 100);
+    area.append(frame);
+  } else {
+    if (preview.messages && preview.messages.length) {
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.textContent = `Átalakítási megjegyzések: ${preview.messages.join(" · ")}`;
+      area.append(note);
+    }
+    area.append(textToolbar(preview), textBlock(tab === "source" ? preview.source : preview.text, query));
+  }
+}
+
+/**
+ * PDF page image with page navigation, its text layer and cross-page search hits.
+ */
+function renderPdfPreview(area, entry, preview, query) {
+  const viewer = state.viewer;
+  const pager = viewerPager(preview.page, preview.pages);
+  const hits = document.createElement("div");
+  hits.className = "viewer-hits";
+  if (query && viewer.pdfText) {
+    const needle = query.toLocaleLowerCase();
+    const pages = viewer.pdfText
+      .map((text, index) => (text.toLocaleLowerCase().includes(needle) ? index : -1))
+      .filter((index) => index >= 0);
+    hits.textContent = pages.length ? "Találat: " : "Nincs találat a dokumentum szövegében.";
+    pages.forEach((index) => {
+      const jump = document.createElement("button");
+      jump.type = "button";
+      jump.className = "button quiet";
+      jump.textContent = `${index + 1}. oldal`;
+      jump.disabled = index === preview.page;
+      jump.addEventListener("click", () => { viewer.page = index; refreshViewerPreview(); });
+      hits.append(jump);
+    });
+  } else if (query && !viewer.pdfText) {
+    hits.textContent = "Keresés a dokumentumban…";
+    requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/text`)
+      .then((result) => { viewer.pdfText = result.pages || []; renderViewerPreview(entry, { warnings: entry.warnings }); })
+      .catch((error) => { hits.textContent = error.message; });
+  }
+  const figure = document.createElement("div");
+  figure.className = "viewer-image viewer-pdf-page";
+  const image = document.createElement("img");
+  image.src = preview.image_url;
+  image.alt = `${entry.name} – ${preview.page + 1}. oldal`;
+  image.style.width = `${Math.round(preview.width / 2 * viewer.zoom / 100)}px`;
+  figure.append(image);
+  const layer = document.createElement("details");
+  layer.className = "viewer-text-layer";
+  layer.open = Boolean(query);
+  const summary = document.createElement("summary");
+  summary.textContent = preview.text.trim()
+    ? `${preview.page + 1}. oldal szövege (szövegréteg: kijelölhető, kereshető)`
+    : `${preview.page + 1}. oldal: nincs szövegréteg (OCR nélkül nem kinyerhető)`;
+  layer.append(summary, textBlock(preview.text, query));
+  area.append(pager, hits, figure, layer);
+}
+
+/**
+ * Spreadsheet view: sheet tabs, formula bar, values/formulas switch, hidden marks.
+ */
+function renderSheetPreview(area, preview, query) {
+  const viewer = state.viewer;
+  const tabs = document.createElement("div");
+  tabs.className = "viewer-tabs";
+  tabs.setAttribute("role", "tablist");
+  const stateNames = { hidden: "rejtett", veryHidden: "nagyon rejtett" };
+  preview.sheets.forEach((sheet, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `viewer-tab${sheet.state !== "visible" ? " hidden-sheet" : ""}`;
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", String(index === preview.sheet));
+    button.textContent = sheet.name;
+    if (stateNames[sheet.state]) {
+      const tag = document.createElement("span");
+      tag.className = "sheet-state";
+      tag.textContent = stateNames[sheet.state];
+      button.append(tag);
+    }
+    button.addEventListener("click", () => {
+      viewer.sheet = index;
+      viewer.page = 0;
+      refreshViewerPreview();
+    });
+    tabs.append(button);
+  });
+
+  const bar = document.createElement("div");
+  bar.className = "viewer-formula-bar";
+  const cellName = document.createElement("strong");
+  cellName.textContent = viewer.cell || "—";
+  const fx = document.createElement("span");
+  fx.className = "fx";
+  fx.textContent = "ƒx";
+  const content = document.createElement("span");
+  content.className = "formula-content";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = `button quiet toggle-button${viewer.showFormulas ? " active" : ""}`;
+  toggle.setAttribute("aria-pressed", String(Boolean(viewer.showFormulas)));
+  toggle.textContent = "Képletek";
+  toggle.disabled = preview.legacy;
+  toggle.title = preview.legacy ? "Régi XLS-ben a képletek csak a Pontos nézetben látszanak." : "Képletek mutatása a tárolt értékek helyett";
+  toggle.addEventListener("click", () => { viewer.showFormulas = !viewer.showFormulas; renderSheetPreview(area.replaceChildren() || area, preview, query); });
+  bar.append(cellName, fx, content, toggle);
+
+  const showCell = (coordinate, value) => {
+    viewer.cell = coordinate;
+    cellName.textContent = coordinate;
+    const formula = preview.formulas[coordinate];
+    content.textContent = formula
+      ? `${formula}   · tárolt érték: ${value || "(nincs tárolt érték)"}`
+      : value;
+  };
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "viewer-table-wrapper";
+  const table = document.createElement("table");
+  table.className = "viewer-table viewer-sheet-table";
+  table.style.fontSize = `${Math.round(11 * viewer.zoom / 100)}px`;
+  const head = document.createElement("tr");
+  head.append(document.createElement("th"));
+  preview.columns.forEach((letter) => {
+    const th = document.createElement("th");
+    th.textContent = letter;
+    if (preview.hidden_columns.includes(letter)) {
+      th.classList.add("hidden-mark");
+      th.title = "Rejtett oszlop";
+    }
+    head.append(th);
+  });
+  table.append(head);
+  preview.rows.forEach((cells, rowIndex) => {
+    const rowNumber = preview.first_row + rowIndex;
+    const tr = document.createElement("tr");
+    const number = document.createElement("th");
+    number.textContent = String(rowNumber);
+    if (preview.hidden_rows.includes(rowNumber)) {
+      tr.classList.add("hidden-row");
+      number.title = "Rejtett sor";
+    }
+    tr.append(number);
+    cells.forEach((value, columnIndex) => {
+      const coordinate = `${preview.columns[columnIndex]}${rowNumber}`;
+      const td = document.createElement("td");
+      const formula = preview.formulas[coordinate];
+      const shown = viewer.showFormulas && formula ? formula : (value || (formula && preview.values_missing ? formula : value));
+      appendHighlightedText(td, shown || "", query);
+      if (formula) td.classList.add("formula-cell");
+      if (preview.hidden_columns.includes(preview.columns[columnIndex])) td.classList.add("hidden-col");
+      if (preview.comments[coordinate]) {
+        td.classList.add("comment-cell");
+        td.title = `Megjegyzés – ${preview.comments[coordinate]}`;
+      }
+      td.tabIndex = 0;
+      td.addEventListener("click", () => showCell(coordinate, value));
+      td.addEventListener("focus", () => showCell(coordinate, value));
+      tr.append(td);
+    });
+    table.append(tr);
+  });
+  wrapper.append(table);
+  const meta = document.createElement("p");
+  meta.className = "muted";
+  const last = preview.first_row + preview.rows.length - 1;
+  meta.textContent = `Sorok ${preview.first_row}–${Math.max(preview.first_row, last)} / ${preview.total_rows}`
+    + (preview.hidden_rows.length || preview.hidden_columns.length ? " · a rejtett sorok és oszlopok halványan, jelölve látszanak" : "")
+    + (preview.values_missing ? " · a fájl nem tartalmaz tárolt értéket a képletekhez, ezért a képlet látszik" : "");
+  area.append(tabs, bar, wrapper, meta, viewerPager(preview.page, Math.ceil(preview.total_rows / preview.page_size)));
+}
+
+/**
  * Previous/next page buttons for multi-page tables and images.
  */
 function viewerPager(page, pages) {
@@ -2438,7 +2687,7 @@ async function refreshViewerPreview() {
   const viewer = state.viewer;
   const entry = viewer.attachments[Number(viewer.path)];
   try {
-    viewer.preview = await requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}`);
+    viewer.preview = await requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}`);
     renderViewerPreview(entry, { warnings: entry.warnings });
   } catch (error) {
     element("viewer-notice").textContent = error.message;

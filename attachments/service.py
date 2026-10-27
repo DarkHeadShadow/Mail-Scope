@@ -77,40 +77,111 @@ class PreviewCache:
         temporary.replace(path)
 
 
-def preview(cache: PreviewCache, entry: dict[str, Any], data: bytes, page: int = 0) -> dict[str, Any]:
+def _cached_json(cache: PreviewCache, sha256: str, name: str, produce: Any) -> dict[str, Any]:
+    """Return a cached JSON result or produce, store and return it."""
+    cached = cache.read(sha256, name)
+    if cached is None:
+        result = produce()
+        cached = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        cache.write(sha256, name, cached)
+    return json.loads(cached)
+
+
+def preview(
+    cache: PreviewCache, entry: dict[str, Any], data: bytes, page: int = 0, sheet: int = 0
+) -> dict[str, Any]:
     """Return a JSON-ready preview, rendering it in the isolated worker when not cached."""
     view = entry["view"]
     if view == "none":
         return {"kind": "none", "reason": _no_preview_reason(entry)}
     sha256 = entry["sha256"]
     page = max(0, int(page))
-    if view == "image":
-        meta_name = f"image-{page}.json"
-        cached = cache.read(sha256, meta_name)
-        if cached is None:
-            rendered = run_isolated("attachments.render:render_image", data, page)
-            cache.write(sha256, f"image-{rendered['page']}.png", rendered.pop("png"))
-            cached = json.dumps(rendered, ensure_ascii=False).encode("utf-8")
-            cache.write(sha256, meta_name, cached)
-        return json.loads(cached)
-    name = "text.json" if view == "text" else f"table-{page}.json"
-    cached = cache.read(sha256, name)
+    sheet = max(0, int(sheet))
+    if view in {"image", "pdf"}:
+        prefix = "image" if view == "image" else "pdf"
+        target = "attachments.render:render_image" if view == "image" else "attachments.render:render_pdf"
+
+        def produce() -> dict[str, Any]:
+            rendered = run_isolated(target, data, page)
+            cache.write(sha256, f"{prefix}-{rendered['page']}.png", rendered.pop("png"))
+            return rendered
+
+        return _cached_json(cache, sha256, f"{prefix}-{page}.json", produce)
+    if view in {"text", "html"}:
+        result = _cached_json(
+            cache, sha256, "text.json",
+            lambda: run_isolated("attachments.render:render_text", data, entry["name"]),
+        )
+        if view == "html":
+            document_html(cache, entry, data)
+            result["formatted"] = True
+        return result
+    if view == "table":
+        return _cached_json(
+            cache, sha256, f"table-{page}.json",
+            lambda: run_isolated("attachments.render:render_table", data, page),
+        )
+    if view == "docx":
+        def produce_docx() -> dict[str, Any]:
+            rendered = run_isolated("attachments.render:render_docx", data, entry["name"])
+            cache.write(sha256, "document.html", rendered.pop("document").encode("utf-8"))
+            return rendered
+
+        result = _cached_json(cache, sha256, "docx.json", produce_docx)
+        result["formatted"] = True
+        return result
+    if view in {"xlsx", "xls"}:
+        return _cached_json(
+            cache, sha256, f"sheet-{sheet}-{page}.json",
+            lambda: run_isolated(f"attachments.render:render_{view}", data, sheet, page),
+        )
+    return {"kind": "none", "reason": _no_preview_reason(entry)}
+
+
+def analysis(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> dict[str, Any]:
+    """Return document metadata and analyst signals (PDF, DOCX, XLSX, XLS)."""
+    if entry["view"] not in {"pdf", "docx", "xlsx", "xls"}:
+        return {}
+    return _cached_json(
+        cache, entry["sha256"], "analysis.json",
+        lambda: run_isolated("attachments.render:analyze", data, entry["view"]),
+    )
+
+
+def document_html(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> bytes:
+    """Return the sanitized HTML document shown in the sandboxed iframe."""
+    if entry["view"] not in {"docx", "html"}:
+        raise ValueError("Ehhez a melléklethez nincs formázott nézet.")
+    cached = cache.read(entry["sha256"], "document.html")
     if cached is None:
-        if view == "text":
-            rendered = run_isolated("attachments.render:render_text", data, entry["name"])
+        if entry["view"] == "docx":
+            preview(cache, entry, data)
         else:
-            rendered = run_isolated("attachments.render:render_table", data, page)
-        cached = json.dumps(rendered, ensure_ascii=False).encode("utf-8")
-        cache.write(sha256, name, cached)
-    return json.loads(cached)
+            rendered = run_isolated("attachments.render:render_html_document", data, entry["name"])
+            cache.write(entry["sha256"], "document.html", rendered["document"].encode("utf-8"))
+        cached = cache.read(entry["sha256"], "document.html") or b""
+    return cached
+
+
+def extracted_text(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> dict[str, Any]:
+    """Return extracted text: per page for PDF, whole text for documents."""
+    view = entry["view"]
+    if view == "pdf":
+        result = analysis(cache, entry, data)
+        return {"pages": result.get("pages_text", []), "text_layer": result.get("text_layer", False)}
+    if view in {"docx", "text", "html"}:
+        result = preview(cache, entry, data)
+        return {"text": result.get("text", "")}
+    raise ValueError("Ehhez a melléklethez nincs kinyerhető szöveg.")
 
 
 def image_png(cache: PreviewCache, entry: dict[str, Any], data: bytes, page: int = 0) -> bytes:
-    """Return the re-encoded PNG of an image page, rendering it if necessary."""
-    if entry["view"] != "image":
+    """Return the re-encoded PNG of an image page or a rendered PDF page."""
+    if entry["view"] not in {"image", "pdf"}:
         raise ValueError("Ehhez a melléklethez nincs képnézet.")
     meta = preview(cache, entry, data, page)
-    png = cache.read(entry["sha256"], f"image-{meta['page']}.png")
+    prefix = "image" if entry["view"] == "image" else "pdf"
+    png = cache.read(entry["sha256"], f"{prefix}-{meta['page']}.png")
     if png is None:
         raise ValueError("A kép előnézete nem készült el.")
     return png
@@ -124,4 +195,9 @@ def _no_preview_reason(entry: dict[str, Any]) -> str:
         return "Futtatható fájl: biztonsági okból nincs előnézet, csak adatlap és mentés."
     if entry["warnings"] and entry["warnings"][0].startswith("A melléklet nem olvasható"):
         return entry["warnings"][0]
+    name = entry["name"].casefold()
+    if entry["real_kind"] in {"ole", "rtf", "pptx", "odf"} and not name.endswith((".msg", ".xls", ".xlt")):
+        return "Ehhez a formátumhoz LibreOffice kell („Pontos nézet”); az adatlap és a mentés elérhető."
+    if entry["real_kind"] in {"zip", "7z", "rar", "gzip"} or name.endswith(".msg"):
+        return "Az archívumok és a csatolt Outlook-levelek kibontása a következő szakaszban készül el; az adatlap és a mentés elérhető."
     return f"Ehhez a típushoz ({entry['real_label']}) még nincs beépített előnézet; az adatlap és a mentés elérhető."
