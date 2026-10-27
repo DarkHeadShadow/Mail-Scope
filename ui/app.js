@@ -84,6 +84,36 @@ function attachmentBadge(message) {
 }
 
 /**
+ * "Találat a mellékletben: név · hely" for a search hit inside an attachment.
+ */
+function attachmentHitLabel(hit) {
+  return `Találat a mellékletben: ${hit.filename}${hit.location ? ` · ${hit.location}` : ""}`;
+}
+
+/**
+ * A link-style button that opens the hit's attachment at its page or sheet.
+ */
+function attachmentHitButton(messageId, hit) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "attachment-hit";
+  button.textContent = attachmentHitLabel(hit);
+  button.title = "Megnyitás a melléklet-nézegetőben, a találat helyén";
+  button.addEventListener("click", () => openAttachmentHit(messageId, hit));
+  return button;
+}
+
+/**
+ * Open the viewer on the hit's file, page or sheet, with its first search word.
+ */
+function openAttachmentHit(messageId, hit) {
+  const word = (hit.query || "").replace(/["()*]/g, " ").split(/\s+/)
+    .find((part) => part && !["AND", "OR", "NOT"].includes(part)) || "";
+  state.viewerJump = { messageId, path: hit.path, page: hit.page, query: word };
+  openAttachmentViewer(messageId, { path: hit.path });
+}
+
+/**
  * Local calendar day ("YYYY-MM-DD") of a moment, used for timeline grouping.
  */
 function localDay(date) {
@@ -521,6 +551,7 @@ function createSearchCondition(condition = { field: "text", value: "" }) {
     ["source", "Forrás útvonala"],
     ["folder", "Mappa"],
     ["attachment_type", "Melléklet típusa"],
+    ["attachment_text", "Melléklet szövege"],
     ["label", "Címke"],
   ].forEach(([value, label]) => field.add(new Option(label, value)));
   field.value = condition.field || "text";
@@ -678,6 +709,12 @@ function renderDetailedResults() {
       const meta = document.createElement("span");
       meta.textContent = `${message.sender || "Ismeretlen feladó"} · ${formatTimestamp(message.sent_timestamp)} · ${message.source_path}`;
       open.append(subject, meta);
+      if (message.attachment_hit) {
+        const hit = document.createElement("span");
+        hit.className = "attachment-hit-line";
+        hit.textContent = attachmentHitLabel(message.attachment_hit);
+        open.append(hit);
+      }
       open.addEventListener("click", () => {
         navigate("archivum");
         openMessage(Number(message.message_id));
@@ -698,9 +735,14 @@ function renderDetailedResults() {
         const attachments = document.createElement("button");
         attachments.type = "button";
         attachments.className = "button quiet";
-        attachments.textContent = "Mellékletek";
-        attachments.title = "A levél mellékletei a melléklet-nézegetőben";
-        attachments.addEventListener("click", () => openAttachmentViewer(Number(message.message_id)));
+        attachments.textContent = message.attachment_hit ? "Találat megnyitása" : "Mellékletek";
+        attachments.title = message.attachment_hit
+          ? "A találatot tartalmazó melléklet a melléklet-nézegetőben, a találat helyén"
+          : "A levél mellékletei a melléklet-nézegetőben";
+        attachments.addEventListener("click", () => {
+          if (message.attachment_hit) openAttachmentHit(Number(message.message_id), message.attachment_hit);
+          else openAttachmentViewer(Number(message.message_id));
+        });
         actions.append(attachments);
       }
       actions.append(conversation);
@@ -952,8 +994,10 @@ function renderStatus(status) {
     }
   }
   renderVerificationSetting(status);
+  renderAttachmentTextSetting(status);
   const verifying = state.sources.some((source) => source.verification && source.verification.running);
-  if (((job && job.running) || verifying) && !state.pollTimer) {
+  const extracting = Boolean(status.attachment_text && status.attachment_text.running);
+  if (((job && job.running) || verifying || extracting) && !state.pollTimer) {
     state.pollTimer = window.setTimeout(async () => {
       state.pollTimer = null;
       await refreshStatus();
@@ -1007,6 +1051,76 @@ function renderVerificationSetting(status) {
 
 document.querySelectorAll('input[name="verification-mode"]').forEach((radio) => {
   radio.addEventListener("change", () => { state.verificationDirty = true; });
+});
+
+/**
+ * Show the case's attachment-text decision with an estimate, and its progress.
+ */
+function renderAttachmentTextSetting(status) {
+  const setting = status.attachment_text;
+  const section = element("attachment-text-setting");
+  section.hidden = !setting;
+  if (!setting) return;
+  const undecided = !setting.mode;
+  section.classList.toggle("undecided", undecided);
+  element("attachment-text-prompt").hidden = !undecided;
+  element("attachment-text-decision").textContent = setting.mode === "on"
+    ? "· döntés: bekapcsolva"
+    : setting.mode === "off" ? "· döntés: kikapcsolva" : "· még nincs döntés (addig kikapcsolva)";
+  if (!state.attachmentTextDirty) {
+    document.querySelectorAll('input[name="attachment-text-mode"]').forEach((radio) => {
+      radio.checked = radio.value === (setting.mode || "");
+    });
+  }
+  const remaining = Math.max(0, setting.total - setting.done);
+  const seconds = remaining * setting.seconds_per_message;
+  const duration = seconds < 90
+    ? `kb. ${Math.max(1, Math.round(seconds))} másodperc`
+    : seconds < 5400
+      ? `kb. ${Math.round(seconds / 60).toLocaleString("hu-HU")} perc`
+      : `kb. ${(seconds / 3600).toLocaleString("hu-HU", { maximumFractionDigits: 1 })} óra`;
+  element("attachment-text-estimate").textContent = setting.total === 0
+    ? "Becslés: az indexelés után, a mellékletes levelek száma alapján."
+    : remaining === 0
+      ? "Ebben az ügyben minden mellékletes levél fel van dolgozva."
+      : `Ebben az ügyben ${remaining.toLocaleString("hu-HU")} mellékletes levél vár feldolgozásra; ez ${duration} a háttérben, közben a program használható.`;
+  const parts = [];
+  if (setting.running) {
+    parts.push(`Feldolgozás folyamatban: ${setting.done.toLocaleString("hu-HU")} / ${setting.total.toLocaleString("hu-HU")} mellékletes levél`
+      + (setting.current ? ` · ${setting.current}` : ""));
+  } else if (setting.mode === "on" && setting.total > 0) {
+    parts.push(`Feldolgozva: ${setting.done.toLocaleString("hu-HU")} / ${setting.total.toLocaleString("hu-HU")} mellékletes levél`);
+  }
+  if (setting.done > 0) {
+    parts.push(`${setting.files.toLocaleString("hu-HU")} fájl szövege kereshető`);
+    if (setting.no_ocr) parts.push(`${setting.no_ocr.toLocaleString("hu-HU")} képes PDF: szöveg nem kinyerhető (OCR nélkül)`);
+    if (setting.failed) parts.push(`${setting.failed.toLocaleString("hu-HU")} levélnél hiba, részletek a naplóban`);
+  }
+  if (setting.error) parts.push(`A feldolgozás leállt: ${setting.error}`);
+  element("attachment-text-progress").textContent = parts.join(" · ");
+}
+
+document.querySelectorAll('input[name="attachment-text-mode"]').forEach((radio) => {
+  radio.addEventListener("change", () => { state.attachmentTextDirty = true; });
+});
+element("attachment-text-save").addEventListener("click", async () => {
+  const selected = document.querySelector('input[name="attachment-text-mode"]:checked');
+  if (!selected) {
+    showNotice("Válassza ki, hogy a mellékletek szövege is kereshető legyen-e.", true);
+    return;
+  }
+  try {
+    state.attachmentTextDirty = false;
+    renderStatus(await requestJson("/api/settings/attachment-text", {
+      method: "POST",
+      body: JSON.stringify({ mode: selected.value }),
+    }));
+    showNotice(selected.value === "on"
+      ? "Melléklet-szöveg keresése bekapcsolva; a feldolgozás a háttérben fut."
+      : "Melléklet-szöveg keresése kikapcsolva.");
+  } catch (error) {
+    showNotice(error.message, true);
+  }
 });
 element("verification-save").addEventListener("click", async () => {
   const selected = document.querySelector('input[name="verification-mode"]:checked');
@@ -1443,6 +1557,12 @@ function renderMessages() {
     folder.className = "message-folder";
     folder.textContent = `${message.folder_path || "—"} · ${message.source_path}`;
     button.append(subject, meta, folder);
+    if (message.attachment_hit) {
+      const hit = document.createElement("div");
+      hit.className = "attachment-hit-line";
+      hit.textContent = attachmentHitLabel(message.attachment_hit);
+      button.append(hit);
+    }
     list.append(button);
   });
 }
@@ -1822,7 +1942,9 @@ function conversationCard(message, people, personColors) {
     navigate("archivum");
     openMessage(Number(message.message_id));
   });
-  card.append(subject, metadata, recipients, body, expand, openOriginal);
+  card.append(subject, metadata, recipients);
+  if (message.attachment_hit) card.append(attachmentHitButton(Number(message.message_id), message.attachment_hit));
+  card.append(body, expand, openOriginal);
   return card;
 }
 
@@ -2230,6 +2352,15 @@ async function loadViewer() {
       viewer.showFormulas = false;
       viewer.pdfText = null;
       const selected = viewer.nodes.get(path);
+      const jump = state.viewerJump;
+      if (jump && jump.messageId === viewer.messageId && jump.path === path) {
+        state.viewerJump = null;
+        if (Number.isInteger(jump.page)) {
+          if (selected && ["xlsx", "xls"].includes(selected.view)) viewer.sheet = jump.page;
+          else viewer.page = jump.page;
+        }
+        element("viewer-search").value = jump.query;
+      }
       // Formats without a built-in view (DOC, RTF, PPT…) open in the exact view when LibreOffice is there.
       viewer.exactView = Boolean(selected && selected.exact && selected.view === "none" && viewer.exact_available);
     }

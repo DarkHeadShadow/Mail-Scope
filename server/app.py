@@ -17,6 +17,7 @@ import sys
 import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -25,7 +26,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from indexer import (
@@ -35,6 +36,8 @@ from indexer import (
     IndexingService,
     PersonDirectory,
 )
+from indexer.attachment_text import SECONDS_PER_MESSAGE, AttachmentTextJob
+from indexer.database import ATTACHMENT_TEXT_KEY
 from sources.models import MessageLocator, SourceReader
 from sources.content import message_body_text
 from sources.discover import (
@@ -97,30 +100,85 @@ MAX_NESTING_DEPTH = 5
 _ATTACHMENT_PATH = re.compile(r"\d{1,4}(?:/\d{1,5}){0,5}")
 
 
-def _save_path_dialog(default_name: str, description: str) -> str:
-    """Show a native Windows save dialog in front of the browser; empty on cancel."""
-    from tkinter import Tk, filedialog
+@contextmanager
+def _dialog_owner() -> Generator[Any, None, None]:
+    """Yield an invisible, topmost Tk window that owns a native dialog.
+
+    The dialog is requested by the browser, which keeps the foreground, and
+    Windows does not let a background process take it. A withdrawn owner
+    would leave the dialog behind the browser. Instead the owner is a 1×1,
+    fully transparent topmost window in the screen centre (its dialogs stay
+    on top too), brought to the foreground through the browser's input
+    thread, which Windows allows.
+    """
+    from tkinter import Tk
 
     root = Tk()
-    root.withdraw()
+    root.overrideredirect(True)
+    root.attributes("-alpha", 0.0)
     root.attributes("-topmost", True)
+    root.geometry(f"1x1+{root.winfo_screenwidth() // 2}+{root.winfo_screenheight() // 3}")
     try:
         root.update()
+        _bring_to_foreground(root)
         root.lift()
         root.focus_force()
+        yield root
+    finally:
+        root.destroy()
+
+
+def _bring_to_foreground(root: Any) -> None:
+    """Make the Tk window the foreground window on Windows; elsewhere do nothing."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.GetParent.restype = ctypes.c_void_p
+    user32.GetParent.argtypes = (ctypes.c_void_p,)
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    user32.GetWindowThreadProcessId.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    user32.SetForegroundWindow.argtypes = (ctypes.c_void_p,)
+    user32.BringWindowToTop.argtypes = (ctypes.c_void_p,)
+    # Tk's toplevel frame is the parent of the widget window it reports.
+    window = user32.GetParent(root.winfo_id()) or root.winfo_id()
+    foreground = user32.GetForegroundWindow()
+    own_thread = kernel32.GetCurrentThreadId()
+    other_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    attached = bool(other_thread and other_thread != own_thread
+                    and user32.AttachThreadInput(own_thread, other_thread, True))
+    # While Alt is held Windows lifts the foreground lock (the user may be
+    # switching windows). Alt is released only after the switch, so the
+    # key-up reaches this window and does not open the browser's menu.
+    vk_menu, keyup = 0x12, 0x0002
+    user32.keybd_event(vk_menu, 0, 0, 0)
+    try:
+        user32.BringWindowToTop(window)
+        user32.SetForegroundWindow(window)
+    finally:
+        user32.keybd_event(vk_menu, 0, keyup, 0)
+        if attached:
+            user32.AttachThreadInput(own_thread, other_thread, False)
+
+
+def _save_path_dialog(default_name: str, description: str) -> str:
+    """Show a native Windows save dialog in front of the browser; empty on cancel."""
+    from tkinter import filedialog
+
+    with _dialog_owner() as root:
         return filedialog.asksaveasfilename(
             parent=root,
             title="Melléklet mentése",
             initialfile=default_name,
             filetypes=((description, "*" + (Path(default_name).suffix or ".*")), ("Minden fájl", "*")),
         )
-    finally:
-        root.destroy()
 
 
 def _browse_local_path(kind: str, initial_path: str) -> str:
     """Show a native Windows picker for a directory or a supported mail file."""
-    from tkinter import Tk, filedialog
+    from tkinter import filedialog
 
     if kind not in {"directory", "file", "soffice"}:
         raise ValueError("A tallózás típusa directory vagy file legyen.")
@@ -133,15 +191,7 @@ def _browse_local_path(kind: str, initial_path: str) -> str:
         if candidate.is_dir():
             initial_directory = str(candidate)
 
-    root = Tk()
-    root.withdraw()
-    # The dialog is started by the browser, which keeps the foreground; a
-    # topmost owner window brings the picker in front instead of behind it.
-    root.attributes("-topmost", True)
-    try:
-        root.update()
-        root.lift()
-        root.focus_force()
+    with _dialog_owner() as root:
         if kind == "directory":
             return filedialog.askdirectory(
                 parent=root,
@@ -165,8 +215,6 @@ def _browse_local_path(kind: str, initial_path: str) -> str:
                 ("Minden fájl", "*"),
             ),
         )
-    finally:
-        root.destroy()
 
 
 class ApiError(Exception):
@@ -192,6 +240,11 @@ class MailScopeApplication:
         self.database: IndexDatabase | None = None
         self.indexing_service: IndexingService | None = None
         self.job: IndexingJob | None = None
+        self.attachment_job: AttachmentTextJob | None = None
+        # Set when pending attachment text may exist: after opening a case,
+        # finishing an indexing job, or switching the search on.
+        self._attachment_text_check = False
+        self._finished_job: IndexingJob | None = None
         self._discovered: dict[str, DiscoveredSource] = {}
         self._verified_sources: dict[str, tuple[tuple[int, ...], str]] = {}
         self._hash_locks: dict[str, threading.Lock] = {}
@@ -217,6 +270,9 @@ class MailScopeApplication:
             if case_path.exists() and not case_path.is_dir():
                 raise ValueError("Az ügy elérési útja nem mappa.")
             case_path.mkdir(parents=True, exist_ok=True)
+            # The previous case's run stops after its current message, in its own database.
+            self._stop_attachment_text()
+            self.attachment_job = None
             self.case_directory = case_path
             self.database = IndexDatabase.for_case(case_path)
             self.case_log = attach_case_log(case_path)
@@ -236,6 +292,7 @@ class MailScopeApplication:
             self._attachment_passwords = {}
             shutil.rmtree(case_path / ".mailscope" / "tmp", ignore_errors=True)
             self.job = None
+            self._attachment_text_check = True
             self._recent_counts = None
             return self.status()
 
@@ -274,6 +331,8 @@ class MailScopeApplication:
             if missing:
                 raise ValueError("A kiválasztott források közül néhányat újra fel kell ismerni.")
             sources = [self._discovered[path] for path in normalized_paths]
+            # New messages are processed after indexing; the run continues then.
+            self._stop_attachment_text()
             service = self.indexing_service
             if service is None:
                 raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "Az indexelő nem inicializálódott.")
@@ -291,6 +350,7 @@ class MailScopeApplication:
     def stop_indexing_safely(self) -> bool:
         """Cancel active indexing and wait for its committed checkpoint."""
         with self._lock:
+            self._stop_attachment_text()
             job = self.job
             is_running = job is not None and not job.wait(0)
             if is_running:
@@ -330,6 +390,7 @@ class MailScopeApplication:
                 verification = self._verifications.get(int(source["id"]))
                 source["verification"] = None if verification is None else dict(verification)
             message_count = self.database.message_count()
+            self._maybe_start_attachment_text()
             if self._recent_counts != (len(sources), message_count):
                 self._recent_counts = (len(sources), message_count)
                 self._remember_case(len(sources), message_count)
@@ -344,7 +405,64 @@ class MailScopeApplication:
                 "message_count": message_count,
                 "job": job_data,
                 "verification_mode": self.database.metadata_value(_VERIFICATION_MODE_KEY),
+                "attachment_text": self._attachment_text_status(),
             }
+
+    def _attachment_text_status(self) -> dict[str, Any]:
+        """Describe the case's attachment-text decision, progress and estimate."""
+        assert self.database is not None
+        job = self.attachment_job
+        running = job is not None and not job.wait(0)
+        counts = self.database.attachment_text_counts()
+        return {
+            "mode": self.database.metadata_value(ATTACHMENT_TEXT_KEY),
+            "running": running,
+            "current": job.progress.current if running and job is not None else "",
+            "error": None if job is None or running else job.error,
+            "seconds_per_message": SECONDS_PER_MESSAGE,
+            **counts,
+        }
+
+    def _maybe_start_attachment_text(self) -> None:
+        """Start the background extraction when the case wants it and work is pending.
+
+        It waits for indexing to finish, so the two never read sources at once.
+        """
+        assert self.database is not None and self.case_directory is not None
+        if self.job is not None and self.job.wait(0) and self._finished_job is not self.job:
+            self._finished_job = self.job
+            self._attachment_text_check = True
+        if not self._attachment_text_check:
+            return
+        if self.job is not None and not self.job.wait(0):
+            return
+        if self.attachment_job is not None and not self.attachment_job.wait(0):
+            return
+        self._attachment_text_check = False
+        if not self.database.attachment_text_enabled():
+            return
+        if not self.database.attachment_text_pending(1):
+            return
+        self.attachment_job = AttachmentTextJob(self.database, self.case_directory)
+
+    def _stop_attachment_text(self) -> None:
+        """Ask a running extraction to stop after its current message."""
+        if self.attachment_job is not None and not self.attachment_job.wait(0):
+            self.attachment_job.cancel()
+            self._attachment_text_check = True
+
+    def set_attachment_text_mode(self, mode: str) -> dict[str, Any]:
+        """Switch attachment-text search for this case; "on" processes what is missing."""
+        if mode not in {"on", "off"}:
+            raise ValueError("A melléklet-szöveg keresése on vagy off legyen.")
+        with self._lock:
+            database = self._require_case()
+            database.set_metadata_value(ATTACHMENT_TEXT_KEY, mode)
+            logger.info("Attachment text search for this case set to: %s", mode)
+            if mode == "off":
+                self._stop_attachment_text()
+            self._attachment_text_check = True
+            return self.status()
 
     def set_verification_mode(self, mode: str) -> dict[str, Any]:
         """Store the case's decision on how sources are checked before opening.
@@ -491,7 +609,7 @@ class MailScopeApplication:
             database = self._require_case()
             if len(query) > _MAX_QUERY_LENGTH:
                 raise ValueError("A keresőkifejezés legfeljebb 512 karakter lehet.")
-            return [
+            return _with_attachment_hits(database, [
                 _row_json(row)
                 for row in database.archive_messages(
                     query,
@@ -504,7 +622,7 @@ class MailScopeApplication:
                     limit=limit,
                     offset=offset,
                 )
-            ]
+            ], [query])
 
     def people(self) -> dict[str, list[dict[str, Any]]]:
         """Return curated people and observed addresses available for assignment."""
@@ -538,7 +656,9 @@ class MailScopeApplication:
                 has_attachment=has_attachment,
             )
             return {
-                "results": [_row_json(row) for row in rows],
+                "results": _with_attachment_hits(
+                    database, [_row_json(row) for row in rows], _text_condition_values(conditions)
+                ),
                 "total": total,
                 "limit": limit,
                 "offset": offset,
@@ -942,6 +1062,7 @@ class MailScopeApplication:
                 threads[str(message["thread_key"])] = str(
                     message["subject"] or "(nincs tárgy)"
                 )
+            _with_attachment_hits(database, messages, [query])
             return {
                 "people": [asdict(selected_people[person_id]) for person_id in person_ids],
                 "messages": messages,
@@ -1869,6 +1990,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     if value != "":
                         raise ValueError("A LibreOffice helyét a tallózóval válassza ki.")
                     response = self.server.application.set_libreoffice_path("")
+            elif path == "/api/settings/attachment-text":
+                response = self.server.application.set_attachment_text_mode(
+                    _required_string(payload, "mode")
+                )
             elif path == "/api/settings/verification":
                 response = self.server.application.set_verification_mode(
                     _required_string(payload, "mode")
@@ -1959,6 +2084,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
             "source",
             "folder",
             "attachment_type",
+            "attachment_text",
             "label",
         }
 
@@ -2145,6 +2271,32 @@ def _source_json(source: DiscoveredSource) -> dict[str, Any]:
         "sha256": source.sha256,
         "folder": source.folder,
     }
+
+
+def _with_attachment_hits(
+    database: IndexDatabase, rows: list[dict[str, Any]], queries: list[str]
+) -> list[dict[str, Any]]:
+    """Add ``attachment_hit`` (file, page or sheet) to rows found in attachment text."""
+    message_ids = [int(row["message_id"]) for row in rows]
+    hits: dict[int, dict[str, Any]] = {}
+    for query in queries:
+        missing = [message_id for message_id in message_ids if message_id not in hits]
+        if query.strip() and missing:
+            for message_id, hit in database.attachment_text_hits(missing, query).items():
+                hits.setdefault(message_id, {**hit, "query": query})
+    for row in rows:
+        row["attachment_hit"] = hits.get(int(row["message_id"]))
+    return rows
+
+
+def _text_condition_values(conditions: tuple[dict[str, Any], ...]) -> list[str]:
+    """Collect the full-text and attachment-text values of a detailed search."""
+    values: list[str] = []
+    for item in conditions:
+        for condition in item.get("conditions", [item]):
+            if condition.get("field") in {"text", "attachment_text"}:
+                values.append(str(condition.get("value", "")))
+    return values
 
 
 def _row_json(row: sqlite3.Row) -> dict[str, Any]:

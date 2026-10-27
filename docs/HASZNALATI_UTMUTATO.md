@@ -189,6 +189,40 @@ ellenőrzési mód között. A két lehetőség és következményeik a kártyá
 [12. fejezet](#12-forrásintegritás-hash-ellenőrzés) írja le. A döntés az ügyben megmarad, és bármikor
 megváltoztatható. Döntésig a gyors mód érvényes.
 
+### Melléklet-szöveg keresése (ügyenkénti döntés)
+
+Alatta egy második kártya kérdezi meg, hogy a keresés a **mellékletek szövegében** is keressen-e.
+A kártya becsli, mennyi ideig tart a feldolgozás (a mellékletes levelek számából; új ügyben az
+indexelés után látszik). A döntés az ügyben megmarad, és bármikor megváltoztatható. Döntésig ki
+van kapcsolva.
+
+- **Bekapcsolva** a program a háttérben újra beolvassa a mellékletes leveleket a változatlan
+  forrásból (a leveleket nem indexeli újra), és kinyeri a mellékletek szövegét:
+  - PDF (oldalanként), Word (DOCX), Excel (XLSX, XLS; munkalaponként, a rejtett lapokat is), CSV,
+    szöveges és HTML fájlok, csatolt levelek (EML, MSG);
+  - archívumokban (ZIP, 7z, gzip; RAR telepített 7-Zippel) és csatolt levelekben lévő ugyanilyen
+    fájlok; jelszavas archívum belseje nem;
+  - mellékletenként legfeljebb 2 MB szöveg.
+- Minden fájlt **SHA-256 szerint egyszer** dolgoz fel; ha ugyanaz a fájl több levélben is
+  szerepel, mindegyiknél megtalálja.
+- A feldolgozás ugyanabban az elkülönített, idő- és memóriakorlátos folyamatban fut, mint a
+  melléklet-nézegető, és előtte ellenőrzi a forrás SHA-256-ját. Közben a program használható.
+- Megszakítás (kikapcsolás, leállítás, új indexelés) után **ott folytatódik**, ahol abbamaradt.
+  A később indexelt levelek mellékleteit az indexelés végén dolgozza fel.
+- A **képes (szkennelt) PDF** szövege OCR nélkül nem nyerhető ki; ezt a kártya „szöveg nem
+  kinyerhető (OCR nélkül)” jelzéssel számolja.
+- A kártya alján az állapot látszik: hány mellékletes levél van feldolgozva, hány fájl szövege
+  kereshető, hány képes PDF és hány hiba volt (a hibák részletei az ügy naplójában).
+- **Kikapcsolva** nincs háttérfeldolgozás, és a keresés nem nézi a mellékletek szövegét. A már
+  kinyert szöveg megmarad, így egy újabb bekapcsolás csak a hiányzó mellékleteket dolgozza fel.
+
+Bekapcsolt melléklet-szöveg mellett az Archívum keresőmezője, a beszélgetéskereső és a részletes
+keresés „Teljes szöveg” feltétele a mellékletekben is talál. A találatnál egy sor mutatja, hol:
+„**Találat a mellékletben:** Kotberszamitas.xlsx · Számítás lap” vagy „… szamla.pdf · 3. oldal”.
+A részletes keresésben a **Találat megnyitása**, a beszélgetésnézetben maga a sor nyitja meg a
+mellékletet a nézegetőben, azon az oldalon vagy munkalapon, a keresett szóval a dokumentum
+keresőjében.
+
 ## 6. 02 · Archívum böngésző
 
 ### Szűrők
@@ -287,7 +321,7 @@ a hiányzó levélre hivatkoztat, a program ezeket tárgy szerint külön szála
 
 | Mező | Érték |
 | --- | --- |
-| Teljes szöveg | szavak a tárgyban, törzsben, mellékletnevekben ([szintaxis](#10-keresési-szintaxis)) |
+| Teljes szöveg | szavak a tárgyban, törzsben, mellékletnevekben, bekapcsolt melléklet-szöveg mellett a mellékletek szövegében is ([szintaxis](#10-keresési-szintaxis)) |
 | Tárgy | szövegrész a tárgyban |
 | Feladó / Címzett | szövegrész a címben vagy a megjelenő névben |
 | Kezdő dátum / Záró dátum | dátum; mindkét határnap beleszámít |
@@ -295,6 +329,7 @@ a hiányzó levélre hivatkoztat, a program ezeket tárgy szerint külön szála
 | Forrás útvonala | szövegrész a forrásfájl útvonalában |
 | Mappa | szövegrész a postafiókmappa nevében |
 | Melléklet típusa | MIME-típus részlete, például `pdf` |
+| Melléklet szövege | szavak a mellékletek szövegében ([szintaxis](#10-keresési-szintaxis)); csak bekapcsolt [melléklet-szöveg](#melléklet-szöveg-keresése-ügyenkénti-döntés) mellett |
 | Címke | szövegrész a címkében |
 
 A **Keresés** gomb indítja. Mellette a **Csak melléklettel** kapcsológomb (egérrel vagy
@@ -548,8 +583,8 @@ a program azonnal jelzi; a tartalom szerinti álcázást a melléklet első megn
 
 ## 10. Keresési szintaxis
 
-Az Archívum szövegmezője, a beszélgetéskereső és a „Teljes szöveg” feltétel ugyanazt a szintaxist
-használja.
+Az Archívum szövegmezője, a beszélgetéskereső, a „Teljes szöveg” és a „Melléklet szövege” feltétel
+ugyanazt a szintaxist használja.
 
 | Beírás | Jelentés |
 | --- | --- |
@@ -618,7 +653,7 @@ módban is érdemes ezt a gombot használni.
 
 | Hely | Tartalom |
 | --- | --- |
-| `<ügymappa>\.mailscope\index.sqlite3` | az ügy indexe: levelek, személyek, címkék, mentett keresések, ellenőrzési adatok |
+| `<ügymappa>\.mailscope\index.sqlite3` | az ügy indexe: levelek, személyek, címkék, mentett keresések, ellenőrzési adatok, bekapcsolt melléklet-szöveg mellett a mellékletek kinyert szövege |
 | `<ügymappa>\.mailscope\mailscope.log` | az ügy naplója: források, hash-ek, ellenőrzések, hibák |
 | `%LOCALAPPDATA%\Mail-Scope\logs\mail-scope.log` | az alkalmazás naplója (rotált, legfeljebb 5 × 5 MB) |
 | `%APPDATA%\Mail-Scope\recent.json` | a legutóbbi ügyek listája (név, útvonal, darabszámok) |
@@ -639,7 +674,8 @@ az ügymappa `.mailscope` almappáját.
 
 - PST/OST olvasáshoz a mellékelt libpff könyvtár szükséges; sérült vagy nem támogatott
   Outlook-elemek „hibás” bejegyzésként jelennek meg.
-- A mellékletek **tartalmában** még nem lehet keresni, csak a nevükben.
+- A mellékletek szövegében csak bekapcsolt melléklet-szöveg mellett lehet keresni; OCR nincs, a
+  jelszavas archívumok belsejét nem dolgozza fel, és mellékletenként legfeljebb 2 MB szöveget tárol.
 - Exportkorlátok: CSV 10 000 találat, EML ZIP 500 levél és 256 MiB, PDF-jelentés 2000 találat.
 - A beszélgetésnézet legfeljebb 10 000 levelet és 50 személyt kezel egyszerre; nagyobb halmaznál
   szűkítsen dátumra vagy témára.

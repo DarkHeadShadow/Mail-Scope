@@ -18,6 +18,16 @@ from sources.models import MessageLocator, MessageMetadata
 
 USER_WRITE_TIMEOUT_SECONDS = 5
 NO_SEARCH_WORD_MESSAGE = "A keresőkifejezésben nincs kereshető szó."
+ATTACHMENT_TEXT_KEY = "attachment_text_search"
+ATTACHMENT_TEXT_OFF_MESSAGE = (
+    "Ebben az ügyben a melléklet-szöveg keresése ki van kapcsolva (Ügy és források lap)."
+)
+_MESSAGE_TEXT_MATCH = "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
+_ATTACHMENT_TEXT_MATCH = """messages.id IN (
+    SELECT attachment_files.message_id FROM attachments_fts
+    JOIN attachment_files ON attachment_files.sha256 = attachments_fts.sha256
+    WHERE attachments_fts MATCH ?
+)"""
 BUSY_MESSAGE = "Az indexelés éppen ír az adatbázisba, próbálja újra néhány másodperc múlva."
 
 
@@ -158,6 +168,29 @@ CREATE TABLE IF NOT EXISTS attachment_files (
     PRIMARY KEY(message_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_attachment_files_sha256 ON attachment_files(sha256);
+
+-- Searchable attachment text, stored once per SHA-256; attachment_files says
+-- which messages and positions carry the same file.
+CREATE TABLE IF NOT EXISTS attachment_texts (
+    sha256 TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS attachments_fts USING fts5(
+    text,
+    filename UNINDEXED,
+    location UNINDEXED,
+    page UNINDEXED,
+    sha256 UNINDEXED,
+    tokenize='unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS attachment_text_messages (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    error TEXT
+);
 
 CREATE TABLE IF NOT EXISTS ignored_addresses (
     address TEXT PRIMARY KEY
@@ -1107,10 +1140,7 @@ class IndexDatabase:
         filters, parameters = occurrence_filters("occurrences")
         match = optional_fts_query(query)
         if match:
-            filters.append(
-                "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
-            )
-            parameters.append(match)
+            filters.append(self._text_match_filter(match, parameters))
         if has_attachments:
             filters.append(
                 "EXISTS (SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
@@ -1254,19 +1284,24 @@ class IndexDatabase:
             value = raw_value.strip()
             if len(value) > 512:
                 raise ValueError("Search condition values must be 512 characters or fewer")
-            if field in {"text", "subject"}:
+            if field == "attachment_text":
+                if not self.attachment_text_enabled():
+                    raise ValueError(ATTACHMENT_TEXT_OFF_MESSAGE)
+                match = fts_query(value)
+                if not match:
+                    raise ValueError(NO_SEARCH_WORD_MESSAGE)
+                expression_parts.append(_ATTACHMENT_TEXT_MATCH)
+                parameters.append(match)
+            elif field in {"text", "subject"}:
                 if not value:
                     raise ValueError("Text search conditions must not be empty")
                 if field == "text":
                     # The FTS match runs once per query; a correlated EXISTS
                     # would evaluate it again for every message row.
-                    expression_parts.append(
-                        "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
-                    )
                     match = fts_query(value)
                     if not match:
                         raise ValueError(NO_SEARCH_WORD_MESSAGE)
-                    parameters.append(match)
+                    expression_parts.append(self._text_match_filter(match, parameters))
                 else:
                     expression_parts.append(
                         "casefold(messages.subject) LIKE ? ESCAPE '\\'"
@@ -1677,10 +1712,7 @@ class IndexDatabase:
             parameters.extend(person_ids)
         match = optional_fts_query(query)
         if match:
-            filters.append(
-                "messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)"
-            )
-            parameters.append(match)
+            filters.append(self._text_match_filter(match, parameters))
         if thread_key:
             filters.append("messages.thread_key = ?")
             parameters.append(thread_key)
@@ -2211,6 +2243,159 @@ class IndexDatabase:
                     for entry in entries
                 ],
             )
+
+    def attachment_text_enabled(self) -> bool:
+        """Whether this case searches attachment text as well as messages."""
+        return self.metadata_value(ATTACHMENT_TEXT_KEY) == "on"
+
+    def _text_match_filter(self, match: str, parameters: list[Any]) -> str:
+        """Return the full-text predicate, with attachment text when the case enables it."""
+        parameters.append(match)
+        if not self.attachment_text_enabled():
+            return _MESSAGE_TEXT_MATCH
+        parameters.append(match)
+        return f"({_MESSAGE_TEXT_MATCH} OR {_ATTACHMENT_TEXT_MATCH})"
+
+    def attachment_text_pending(self, limit: int = 50) -> list[int]:
+        """Return messages with attachments whose text has not been processed yet."""
+        with self.connection() as connection:
+            return [
+                int(row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT messages.id FROM messages
+                    WHERE EXISTS (SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM attachment_text_messages
+                          WHERE attachment_text_messages.message_id = messages.id
+                      )
+                    ORDER BY messages.id
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            ]
+
+    def attachment_text_counts(self) -> dict[str, int]:
+        """Count processed and pending messages and the text found, for the status line."""
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT count(DISTINCT message_id) FROM attachments) AS total,
+                    (SELECT count(*) FROM attachment_text_messages) AS done,
+                    (SELECT count(*) FROM attachment_text_messages WHERE status = 'error') AS failed,
+                    (SELECT count(*) FROM attachment_texts WHERE status = 'text') AS files,
+                    (SELECT count(*) FROM attachment_texts WHERE status = 'no_ocr') AS no_ocr
+                """
+            ).fetchone()
+        return {key: int(row[key]) for key in ("total", "done", "failed", "files", "no_ocr")}
+
+    def known_attachment_texts(self, sha256_values: list[str]) -> list[str]:
+        """Return which of these files already have their text stored."""
+        if not sha256_values:
+            return []
+        with self.connection() as connection:
+            return [
+                str(row["sha256"])
+                for row in connection.execute(
+                    f"""
+                    SELECT sha256 FROM attachment_texts
+                    WHERE sha256 IN ({", ".join("?" for _ in sha256_values)})
+                    """,
+                    sha256_values,
+                )
+            ]
+
+    def store_attachment_texts(
+        self,
+        message_id: int,
+        results: list[dict[str, Any]],
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Record one message's attachment files and the text of files seen for the first time."""
+        with self.connection(write=True) as connection:
+            if connection.execute("SELECT 1 FROM messages WHERE id = ?", (message_id,)).fetchone() is None:
+                return
+            connection.executemany(
+                """
+                INSERT INTO attachment_files(
+                    message_id, position, filename, content_type, size, sha256, real_kind, suspicious
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id, position) DO UPDATE SET
+                    filename = excluded.filename, content_type = excluded.content_type,
+                    size = excluded.size, sha256 = excluded.sha256,
+                    real_kind = excluded.real_kind, suspicious = excluded.suspicious
+                """,
+                [
+                    (
+                        message_id, item["path"], item["name"], item["content_type"],
+                        item["size"], item["sha256"], item["real_kind"], int(item["suspicious"]),
+                    )
+                    for item in results
+                ],
+            )
+            for item in results:
+                if item["status"] == "known":
+                    continue
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO attachment_texts(sha256, status, note) VALUES (?, ?, ?)",
+                    (item["sha256"], item["status"], item["note"]),
+                ).rowcount
+                if inserted:
+                    connection.executemany(
+                        """
+                        INSERT INTO attachments_fts(text, filename, location, page, sha256)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (text, item["name"], location, page, item["sha256"])
+                            for location, page, text in item["segments"]
+                        ],
+                    )
+            connection.execute(
+                """
+                INSERT INTO attachment_text_messages(message_id, status, error) VALUES (?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET status = excluded.status, error = excluded.error
+                """,
+                (message_id, "error" if error else "done", error),
+            )
+
+    def attachment_text_hits(self, message_ids: list[int], query: str) -> dict[int, dict[str, Any]]:
+        """Return the first attachment of each message whose text matches the search.
+
+        Empty when the case does not search attachment text or the query is empty.
+        """
+        match = optional_fts_query(query)
+        if not match or not message_ids or not self.attachment_text_enabled():
+            return {}
+        hits: dict[int, dict[str, Any]] = {}
+        with self.connection() as connection, _fts_errors():
+            rows = connection.execute(
+                f"""
+                SELECT attachment_files.message_id, attachment_files.position,
+                       attachment_files.filename, attachments_fts.location, attachments_fts.page
+                FROM attachments_fts
+                JOIN attachment_files ON attachment_files.sha256 = attachments_fts.sha256
+                WHERE attachments_fts MATCH ?
+                  AND attachment_files.message_id IN ({", ".join("?" for _ in message_ids)})
+                ORDER BY attachment_files.message_id, length(attachment_files.position),
+                         attachment_files.position, attachments_fts.rowid
+                """,
+                [match, *message_ids],
+            ).fetchall()
+        for row in rows:
+            hits.setdefault(
+                int(row["message_id"]),
+                {
+                    "path": str(row["position"]),
+                    "filename": str(row["filename"]),
+                    "location": str(row["location"] or ""),
+                    "page": None if row["page"] in (None, "") else int(row["page"]),
+                },
+            )
+        return hits
 
     def attachments_with_hash(self, sha256: str, exclude_message_id: int) -> list[sqlite3.Row]:
         """List other analysed attachments with the same SHA-256, with their messages."""

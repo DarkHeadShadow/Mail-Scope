@@ -18,6 +18,7 @@ Mail-Scope is an offline, local-first mail archive browser and analysis tool. It
 - Export detailed-search results to CSV or EML ZIP; print a bounded search report to PDF using the browser's print dialog.
 - Keep indexes, labels, saved searches, and the case log (`mailscope.log`) inside the case's `.mailscope` directory. The application log is written to `%LOCALAPPDATA%\Mail-Scope\logs\mail-scope.log`.
 - Full-text search matches word prefixes, so `szerződés` also finds `szerződést`; use quotes for an exact phrase and `AND`, `OR`, `NOT` as operators.
+- Optionally search attachment text too, per case: PDF, DOCX, XLSX, XLS, CSV and text files, including those inside archives and attached e-mails; hits say where they are (“Találat a mellékletben: Kotberszamitas.xlsx · Számítás lap”).
 
 ## Privacy and source integrity
 
@@ -84,9 +85,11 @@ A complete step-by-step user guide is available in Hungarian: [Használati útmu
 
 Each page has its own address (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), so Back/Forward and reload keep the current page; `Ctrl+1`…`Ctrl+5` switch pages outside input fields. Switching pages keeps filters, the selected message, the loaded conversation, and search conditions. On narrow screens the sidebar becomes a horizontal, scrollable tab bar. The welcome screen's circuit-board animation stops when the window is hidden, when a case is opened, and entirely when Windows “Show animations” is turned off (reduced motion).
 
-Detailed search supports subject, full-text, sender, recipient, inclusive date boundaries, attachment presence, source path, folder, attachment media type, and label conditions. Conditions may be grouped with AND/OR; groups can also be combined with AND/OR.
+Detailed search supports subject, full-text, sender, recipient, inclusive date boundaries, attachment presence, source path, folder, attachment media type, attachment text, and label conditions. Conditions may be grouped with AND/OR; groups can also be combined with AND/OR.
 
 Attachments open in the built-in **attachment viewer** (from the reading pane, the conversation cards or the search results): an attachment tree, a safe preview (PDF pages with their text layer, Word documents, Excel workbooks with hidden sheets, formulas and comments, text with encoding detection, CSV tables, images re-encoded to PNG; HTML and Word documents are shown sanitized in a sandboxed frame; ZIP, 7z, gzip and, with an installed 7-Zip, RAR archives and attached EML/Outlook MSG messages open as tree branches in memory, with ZIP-bomb limits and session-only archive passwords; with an installed LibreOffice, a “Pontos nézet” draws Office, OpenDocument and RTF files as PDF pages, with macros disabled) and an analyst data sheet with the real type, SHA-256, location, warnings and the same file in other messages. Nothing in an attachment runs, raw files never go to the browser, and parsing happens in a separate, time- and memory-limited process. Attachments are saved only through **Mentés…**, with a `.sha256` and a provenance file.
+
+**Attachment text search** is a per-case decision on the case page, asked like the source verification mode, with a time estimate. When it is on, a background job reads the messages that have attachments from their unchanged sources again (the messages are not re-indexed) and extracts the text of PDF (per page), DOCX, XLSX and XLS (per sheet, hidden sheets included), CSV, text and HTML files, and of attached e-mails, also inside archives without a password; at most 2 MB of text per file. Each file is processed once by its SHA-256, the work runs in the same isolated worker as the viewer, and a stopped run continues where it left off; messages indexed later are processed after indexing. The full-text search of the archive, the conversation view and the detailed search then also match attachment text, and the detailed search gets a “Melléklet szövege” field. A hit shows the file and page or sheet and opens the viewer there. A PDF without a text layer is reported as “szöveg nem kinyerhető (OCR nélkül)”; there is no OCR. Switching it off keeps the extracted text but stops searching it.
 
 Messages with attachments show a paperclip and the number of attachments in the search results, the archive list and the conversation timeline; hovering lists up to five file names. The **Csak melléklettel** toggle next to the search button limits the whole query to messages with at least one attachment (combined with AND, even when the groups are joined with OR). Saved searches keep the toggle, and the CSV, EML ZIP and PDF exports use the same filtered set; the CSV also has “Mellékletek száma” and “Mellékletek neve” columns.
 
@@ -95,7 +98,8 @@ Messages with attachments show a paperclip and the number of attachments in the 
 - PST/OST parsing depends on the optional native `pypff` binding and its libpff capabilities. Damaged or unsupported Outlook items are indexed as failed entries; a failing source is recorded and the remaining sources are still indexed.
 - Exchange (`/O=…/CN=…`) addresses are converted to SMTP only when the mailbox itself contains the pair (for example in a recipient table); otherwise the Exchange address is kept.
 - Messages without reply headers are joined to an existing thread by subject only if they carry a reply/forward prefix, and share a participant; with no time limit, they join the closest-dated such thread.
-- Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source.
+- Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source. Extracted attachment text is stored only for searching.
+- Attachment text search has no OCR, skips password-protected archives, and keeps at most 2 MB of text per file.
 - A PDF is produced through the browser's print dialog, not by a bundled PDF library.
 - Search and export limits are enforced to keep local responses bounded.
 - Public-release preparation remains pending.
@@ -133,6 +137,12 @@ Attachment viewer with the analyst data sheet (image with EXIF and GPS), and a d
 ![Mail-Scope attachment viewer showing an Excel workbook with hidden sheets and a formula](./docs/screenshots/attachment-xlsx.png)
 
 ![Mail-Scope attachment viewer showing a ZIP archive with a nested archive and a disguised program](./docs/screenshots/attachment-zip.png)
+
+Attachment text search: the per-case decision with its progress, and detailed-search hits inside a Word document and a PDF packed in a ZIP:
+
+![Mail-Scope case setting for attachment text search](./docs/screenshots/attachment-text-setting.png)
+
+![Mail-Scope detailed search finding a word in attachment text](./docs/screenshots/attachment-text-search.png)
 
 Conversation view of two people:
 

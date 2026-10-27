@@ -18,6 +18,7 @@ A Mail-Scope offline, helyben futó levélnéző és -elemző program. Közvetle
 - Részletes keresési találatok exportja CSV-be vagy EML ZIP-be; korlátozott keresési jelentés nyomtatása/PDF-be mentése a böngészőből.
 - Az index, a címkék, a mentett keresések és az ügynapló (`mailscope.log`) az ügy `.mailscope` mappájában maradnak. Az alkalmazásnapló helye: `%LOCALAPPDATA%\Mail-Scope\logs\mail-scope.log`.
 - A teljes szöveges keresés szókezdetre illeszt, így a `szerződés` a `szerződést` alakot is megtalálja; pontos kifejezéshez idézőjel, operátorként `AND`, `OR`, `NOT` használható.
+- Ügyenként választhatóan a mellékletek szövegében is keres: PDF, DOCX, XLSX, XLS, CSV és szöveges fájlok, az archívumokban és csatolt levelekben lévők is; a találat megmutatja, hol van („Találat a mellékletben: Kotberszamitas.xlsx · Számítás lap”).
 
 ## Adatvédelem és forrásintegritás
 
@@ -84,9 +85,11 @@ A teljes, lépésenkénti leírás: [Használati útmutató](./docs/HASZNALATI_U
 
 Minden lapnak saját címe van (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kereses`, `#/szemelyek`), így a Vissza/Előre gomb és a frissítés is az aktuális lapon marad; beviteli mezőn kívül a `Ctrl+1`…`Ctrl+5` vált lapot. Lapváltáskor megmaradnak a szűrők, a kijelölt levél, a betöltött beszélgetés és a keresési feltételek. Keskeny képernyőn az oldalsáv vízszintes, görgethető lapsávvá alakul. A nyitóképernyő áramköri animációja megáll, ha az ablak rejtett vagy ügy nyílik meg, és egyáltalán nem fut, ha a Windows „Animációk megjelenítése” beállítása ki van kapcsolva (csökkentett mozgás).
 
-A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
+A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa, melléklet szövege és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
 
 A mellékletek a beépített **melléklet-nézegetőben** nyílnak meg (az olvasópanelből, a beszélgetés-buborékokból vagy a keresési találatokból): mellékletfa, biztonságos előnézet (PDF-oldalak szövegréteggel, Word-dokumentumok, Excel-munkafüzetek rejtett lapokkal, képletekkel és megjegyzésekkel, szöveg kódolásfelismeréssel, CSV-tábla, PNG-be újrakódolt kép; a HTML- és Word-dokumentumok tisztítva, homokozott keretben jelennek meg; a ZIP-, 7z-, gzip- és – telepített 7-Zippel – RAR-archívumok, valamint a csatolt EML- és Outlook MSG-levelek a fában kibontható ágként, a memóriában nyílnak meg, ZIP-bomba-korlátokkal és csak a munkamenetig élő archívumjelszóval; telepített LibreOffice-szal a „Pontos nézet” az Office-, OpenDocument- és RTF-fájlokat PDF-oldalakként mutatja, letiltott makrókkal) és elemzői adatlap a valódi típussal, SHA-256-tal, hellyel, figyelmeztetésekkel és az ugyanilyen fájlt tartalmazó más levelekkel. A mellékletből semmi nem fut, nyers fájl nem kerül a böngészőbe, a feldolgozás pedig külön, idő- és memóriakorlátos folyamatban történik. Melléklet csak a **Mentés…** gombbal kerül ki, `.sha256` és eredetleíró fájllal.
+
+A **melléklet-szöveg keresése** ügyenkénti döntés az Ügy lapon; a program a forrásellenőrzési módhoz hasonlóan, időbecsléssel kérdez rá. Bekapcsolva egy háttérfeladat újra beolvassa a mellékletes leveleket a változatlan forrásból (a leveleket nem indexeli újra), és kinyeri a PDF (oldalanként), DOCX, XLSX és XLS (munkalaponként, a rejtett lapokat is), CSV, szöveges és HTML fájlok, valamint a csatolt levelek szövegét, a jelszó nélküli archívumokban lévőkét is; fájlonként legfeljebb 2 MB-ot. Minden fájlt SHA-256 szerint egyszer dolgoz fel, ugyanabban az elkülönített folyamatban, mint a nézegető; megszakítás után ott folytatja, ahol abbamaradt, a később indexelt leveleket pedig az indexelés után dolgozza fel. Ezután az Archívum keresője, a beszélgetésnézet és a részletes keresés is talál a mellékletek szövegében, a részletes keresésben pedig „Melléklet szövege” mező is van. A találat a fájlt és az oldalt vagy munkalapot mutatja, és ott nyitja meg a nézegetőt. A szövegréteg nélküli PDF-nél „szöveg nem kinyerhető (OCR nélkül)” jelzés látszik; OCR nincs. Kikapcsoláskor a kinyert szöveg megmarad, de a keresés nem használja.
 
 A mellékletes leveleknél a találatokban, az Archívum listájában és a beszélgetés-idővonalon gemkapocs és a mellékletek száma látszik; fölé állva a program legfeljebb öt fájlnevet sorol fel. A Keresés gomb melletti **Csak melléklettel** kapcsoló az egész lekérdezést a legalább egy melléklettel rendelkező levelekre szűkíti (ÉS kapcsolattal, akkor is, ha a csoportok között VAGY áll). A mentett keresés megőrzi a kapcsoló állását, a CSV, EML ZIP és PDF export pedig ugyanazt a szűrt halmazt adja; a CSV-ben „Mellékletek száma” és „Mellékletek neve” oszlop is van.
 
@@ -95,7 +98,8 @@ A mellékletes leveleknél a találatokban, az Archívum listájában és a besz
 - A PST/OST olvasás az opcionális natív `pypff` kötéstől és a libpff képességeitől függ. Sérült vagy nem támogatott Outlook-elemek „hibás” bejegyzésként kerülnek az indexbe; egy sikertelen forrás naplózódik, a többi forrás indexelése folytatódik.
 - Az Exchange (`/O=…/CN=…`) címek csak akkor alakulnak SMTP-címmé, ha a postafiók maga tartalmazza a párosítást (például egy címzetttáblában); egyébként az Exchange-cím marad.
 - Válaszfejléc nélküli levél csak akkor kerül tárgy alapján egy meglévő szálba, ha válasz/továbbítás előtagja van, és van közös résztvevője; időkorlát nélkül, a dátumban legközelebbi ilyen szálba.
-- A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni.
+- A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni. A mellékletek kinyert szövege csak a kereséshez tárolódik.
+- A melléklet-szöveg keresésében nincs OCR, a jelszavas archívumok belsejét nem dolgozza fel, és fájlonként legfeljebb 2 MB szöveget tárol.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.
 - A nyilvános közzététel előkészítése még hátravan.
@@ -133,6 +137,12 @@ Melléklet-nézegető az elemzői adatlappal (kép EXIF- és GPS-adattal), illet
 ![Mail-Scope melléklet-nézegető Excel-munkafüzettel, rejtett lapokkal és képlettel](./docs/screenshots/attachment-xlsx.png)
 
 ![Mail-Scope melléklet-nézegető ZIP-archívummal, belső archívummal és álcázott programmal](./docs/screenshots/attachment-zip.png)
+
+Melléklet-szöveg keresése: az ügyenkénti döntés az állapottal, és részletes keresési találatok egy Word-dokumentumban és egy ZIP-be csomagolt PDF-ben:
+
+![Mail-Scope ügybeállítás a melléklet-szöveg keresésére](./docs/screenshots/attachment-text-setting.png)
+
+![Mail-Scope részletes keresés találattal a mellékletek szövegében](./docs/screenshots/attachment-text-search.png)
 
 Két személy beszélgetésnézete:
 

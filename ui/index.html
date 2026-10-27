@@ -181,6 +181,35 @@
             </fieldset>
             <button id="verification-save" class="button secondary" type="button">Döntés mentése</button>
           </section>
+          <section id="attachment-text-setting" class="verification-setting" aria-labelledby="attachment-text-setting-title">
+            <div class="list-heading">
+              <div><h3 id="attachment-text-setting-title">Melléklet-szöveg keresése</h3><span id="attachment-text-decision" class="muted"></span></div>
+            </div>
+            <p id="attachment-text-prompt" class="verification-prompt" hidden>
+              Ebben az ügyben még nincs döntés arról, hogy a keresés a mellékletek szövegében is keressen-e. A döntésig csak a levelek szövegében és a mellékletek nevében keres.
+            </p>
+            <fieldset class="verification-options">
+              <legend>Melléklet-szöveg ebben az ügyben</legend>
+              <label class="verification-option">
+                <input type="radio" name="attachment-text-mode" value="on">
+                <span>
+                  <strong>Bekapcsolva: a mellékletek szövege is kereshető</strong>
+                  <small>A háttérben kinyeri a PDF, Word (DOCX), Excel (XLSX, XLS), CSV és szöveges mellékletek szövegét, az archívumokban és a csatolt levelekben lévőkét is; mellékletenként legfeljebb 2 MB-ot. Az ismétlődő fájlokat (azonos SHA-256) csak egyszer dolgozza fel. A leveleket nem indexeli újra, és a feldolgozás megszakítás után folytatódik.</small>
+                  <small><b>Következmény:</b> a teljes szöveges keresés, a beszélgetésnézet és a részletes keresés a mellékletekben is talál, és megmutatja, melyik fájlban és oldalon. A képes (szkennelt) PDF szövege OCR nélkül nem nyerhető ki. <span id="attachment-text-estimate"></span></small>
+                </span>
+              </label>
+              <label class="verification-option">
+                <input type="radio" name="attachment-text-mode" value="off">
+                <span>
+                  <strong>Kikapcsolva</strong>
+                  <small>Csak a levelek tárgyában, törzsében és a mellékletek nevében keres.</small>
+                  <small><b>Következmény:</b> nincs háttérfeldolgozás. A már kinyert szöveg megmarad, így egy későbbi bekapcsolás csak a hiányzó mellékleteket dolgozza fel.</small>
+                </span>
+              </label>
+            </fieldset>
+            <p id="attachment-text-progress" class="muted attachment-text-progress" role="status" aria-live="polite"></p>
+            <button id="attachment-text-save" class="button secondary" type="button">Döntés mentése</button>
+          </section>
           <p id="case-notice" class="notice" role="status" aria-live="polite"></p>
         </section>
 

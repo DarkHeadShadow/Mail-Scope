@@ -126,6 +126,10 @@ h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .verification-option small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .verification-option b { color: #c8d6cd; font-weight: 600; }
 @media (max-width: 720px) { .verification-options { grid-template-columns: 1fr; } }
+.attachment-text-progress { margin: 0 0 10px; font-size: 10px; line-height: 1.55; }
+.attachment-hit-line { overflow: hidden; margin-top: 5px; color: #9fd8b4; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-hit { display: block; max-width: 100%; margin-top: 6px; padding: 0; overflow: hidden; border: 0; background: none; color: #9fd8b4; font: inherit; font-size: 9px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.attachment-hit:hover, .attachment-hit:focus-visible { text-decoration: underline; }
 .source-integrity progress { width: 160px; height: 8px; accent-color: var(--green); }
 .source-path { overflow: hidden; color: #d5dfd9; text-overflow: ellipsis; white-space: nowrap; }
 .source-kind, .source-status { color: var(--muted); text-transform: uppercase; }

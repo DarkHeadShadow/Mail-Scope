@@ -9,6 +9,8 @@ Project changes are recorded here. This project has not made a public release ye
 - Added direct MBOX, EML, and optional PST/OST source readers with content-based discovery.
 - Added a case-local SQLite/FTS5 index with resumable background indexing and source SHA-256 verification.
 - Added people, aliases, duplicate merging, and message threading.
+- Added per-case attachment text search: a resumable background job extracts the text of PDF, DOCX, XLSX, XLS, CSV, text files and attached e-mails (also inside archives) once per SHA-256 into `attachments_fts`; the archive search, the conversation view and the detailed search (new “Melléklet szövege” field) find it and show the file and page or sheet.
+- Fixed the file, folder and save dialogs opening behind the browser: Windows refused the foreground to the background server process, so the dialog now gets an invisible topmost owner that is brought to the foreground first.
 - Subject-only reply threading no longer stops at 60 days; the conversation view examines the selected date range (or first to last message) and marks only silences longer than 10 days, including at the edges of a selected range.
 - Added a loopback-only Hungarian archive and conversation UI.
 - Added detailed AND/OR search groups, case-local labels, and saved searches.

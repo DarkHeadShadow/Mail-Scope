@@ -159,7 +159,13 @@ Forrás lehet:
       `soffice.exe` helye kiválasztható (felhasználói `settings.json`). A valódi
       LibreOffice-teszt (makrós ODT, pozitív kontrollal) LibreOffice 26.2.6-tal lefutott; a
       CI-ben kihagyódik, ha nincs LibreOffice a gépen.
-   5. [ ] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható.
+   5. [x] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható: döntés az Ügy
+      lapon időbecsléssel, háttérben futó, folytatható kinyerés (a leveleket nem indexeli újra),
+      SHA-256 szerint egyszer; PDF oldalanként, XLSX/XLS munkalaponként (rejtettek is), DOCX,
+      CSV, szöveg, csatolt levél, archívumokban is; mellékletenként legfeljebb 2 MB; képes PDF:
+      „szöveg nem kinyerhető (OCR nélkül)”. Az archívumkeresés, a beszélgetésnézet és a részletes
+      keresés („Melléklet szövege” mező) is talál benne, a találat a fájlt és az oldalt vagy
+      munkalapot mutatja, és ott nyitja meg a nézegetőt.
 
 ## Mérföldkövek
 1. [x] Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),
