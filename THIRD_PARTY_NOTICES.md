@@ -61,3 +61,8 @@ because its GPL-3.0 license is not compatible with Mail-Scope's MIT License.
 RAR archives (and ZIP files with AES encryption) are unpacked only when the
 user has installed 7-Zip; Mail-Scope calls the installed `7z.exe` without a
 window and does not ship it.
+
+The optional “Pontos nézet” (exact view) of Office attachments uses LibreOffice
+(MPL-2.0) only when the user has installed it; Mail-Scope runs the installed
+`soffice.exe` as a separate program to convert a copy to PDF and does not ship,
+link or modify LibreOffice.

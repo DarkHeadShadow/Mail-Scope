@@ -2198,6 +2198,9 @@ async function loadViewer() {
       viewer.cell = null;
       viewer.showFormulas = false;
       viewer.pdfText = null;
+      const selected = viewer.nodes.get(path);
+      // Formats without a built-in view (DOC, RTF, PPT…) open in the exact view when LibreOffice is there.
+      viewer.exactView = Boolean(selected && selected.exact && selected.view === "none" && viewer.exact_available);
     }
     renderViewerTree();
     const entry = viewer.nodes.get(path) || viewer.attachments[0];
@@ -2208,11 +2211,11 @@ async function loadViewer() {
     element("viewer-prev").disabled = position <= 0;
     element("viewer-next").disabled = position >= siblings.length - 1;
     element("viewer-zoom").textContent = `${viewer.zoom}%`;
+    if (viewer.exactView) element("viewer-preview").replaceChildren(viewerMessage(EXACT_LOADING_TEXT));
     const [info, preview] = await Promise.all([
       requestJson(`/api/attachments/${viewer.messageId}/${path}/info`),
       // For types without a preview the server only explains why; nothing is rendered.
-      requestJson(`/api/attachments/${viewer.messageId}/${path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}`)
-        .catch((error) => ({ kind: "error", reason: error.message })),
+      requestJson(viewerPreviewUrl()).catch((error) => ({ kind: "error", reason: error.message })),
     ]);
     viewer.preview = preview || { kind: "none", reason: "" };
     if (preview && preview.kind === "archive") registerViewerChildren(entry.path, preview);
@@ -2474,6 +2477,7 @@ function renderViewerPreview(entry, info) {
   area.replaceChildren();
   const preview = state.viewer.preview;
   const viewer = state.viewer;
+  if (entry.exact) area.append(exactViewSwitch(entry));
   if (!preview || preview.kind === "none" || preview.kind === "error") {
     const card = viewerMessage(preview && preview.reason ? preview.reason : "Ehhez a melléklethez nincs előnézet.", preview && preview.kind === "error");
     if (entry.executable || info.warnings.length) card.classList.add("warning");
@@ -2786,7 +2790,7 @@ function renderPdfPreview(area, entry, preview, query) {
     });
   } else if (query && !viewer.pdfText) {
     hits.textContent = "Keresés a dokumentumban…";
-    requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/text`)
+    requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/text${viewer.exactView ? "?exact=1" : ""}`)
       .then((result) => { viewer.pdfText = result.pages || []; renderViewerPreview(entry, { warnings: entry.warnings }); })
       .catch((error) => { hits.textContent = error.message; });
   }
@@ -2946,6 +2950,67 @@ function viewerPager(page, pages) {
   return pager;
 }
 
+const EXACT_LOADING_TEXT = "Átalakítás LibreOffice-szal a Pontos nézethez… (legfeljebb 60 másodperc)";
+
+/**
+ * Preview address of the current attachment, in the built-in or the exact view.
+ */
+function viewerPreviewUrl() {
+  const viewer = state.viewer;
+  const exact = viewer.exactView ? "&exact=1" : "";
+  return `/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}${exact}`;
+}
+
+/**
+ * Built-in / exact (LibreOffice) view switch for Office attachments.
+ */
+function exactViewSwitch(entry) {
+  const viewer = state.viewer;
+  const bar = document.createElement("div");
+  bar.className = "viewer-tabs viewer-mode";
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "Nézet");
+  [[false, "Beépített nézet"], [true, "Pontos nézet (LibreOffice)"]].forEach(([exact, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "viewer-tab";
+    button.setAttribute("aria-pressed", String(Boolean(viewer.exactView) === exact));
+    button.textContent = label;
+    if (exact && !viewer.exact_available) {
+      button.disabled = true;
+      button.title = "A Pontos nézethez LibreOffice kell, de a gépen nem található.";
+    }
+    button.addEventListener("click", () => {
+      if (Boolean(viewer.exactView) === exact) return;
+      viewer.exactView = exact;
+      viewer.page = 0;
+      viewer.pdfText = null;
+      if (exact) element("viewer-preview").replaceChildren(exactViewSwitch(entry), viewerMessage(EXACT_LOADING_TEXT));
+      refreshViewerPreview();
+    });
+    bar.append(button);
+  });
+  if (!viewer.exact_available) {
+    const locate = document.createElement("button");
+    locate.type = "button";
+    locate.className = "button quiet";
+    locate.textContent = "LibreOffice megkeresése…";
+    locate.title = "Ha a LibreOffice nem a szokásos helyre van telepítve, itt kiválaszthatja a soffice.exe programját.";
+    locate.addEventListener("click", async () => {
+      try {
+        const status = await requestJson("/api/settings/libreoffice", { method: "POST", body: JSON.stringify({ pick: true }) });
+        viewer.exact_available = Boolean(status.path);
+        renderViewerPreview(entry, { warnings: entry.warnings });
+      } catch (error) {
+        element("viewer-notice").textContent = error.message;
+        element("viewer-notice").classList.add("error");
+      }
+    });
+    bar.append(locate);
+  }
+  return bar;
+}
+
 /**
  * Reload only the preview (page change) of the current attachment.
  */
@@ -2953,9 +3018,14 @@ async function refreshViewerPreview() {
   const viewer = state.viewer;
   const entry = viewer.nodes.get(viewer.path);
   try {
-    viewer.preview = await requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}`);
+    viewer.preview = await requestJson(viewerPreviewUrl());
     renderViewerPreview(entry, { warnings: entry.warnings });
   } catch (error) {
+    if (viewer.exactView) {
+      // A failed conversion replaces the waiting card; the switch stays to go back.
+      viewer.preview = { kind: "error", reason: error.message };
+      renderViewerPreview(entry, { warnings: entry.warnings });
+    }
     element("viewer-notice").textContent = error.message;
     element("viewer-notice").classList.add("error");
   }

@@ -1,12 +1,15 @@
 __author__ = "Bálint Szabolcs"
 
 import io
+import os
+import subprocess
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from attachments import containers, render
+from attachments import containers, libreoffice, render
 from attachments.detect import detect, is_suspicious_name
 from attachments.sandbox import AttachmentProcessingError, run_isolated
 from attachments.service import describe, expand
@@ -242,6 +245,141 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(result["entries"][2]["container"], "archive")
         self.assertEqual(result["entries"][0]["trail"], "1. melléklet › szamlak/szamla-2023-05.pdf")
         self.assertTrue(result["entries"][3]["executable"])
+
+
+class LibreOfficeTests(unittest.TestCase):
+    """Pontos nézet: detection and the conversion call (mocked), plus a real run when installed."""
+
+    def fixture(self, name: str) -> bytes:
+        return (Path(__file__).parent / "fixtures" / "attachments" / name).read_bytes()
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.root = Path(self.temporary_directory.name)
+
+    def test_detection_prefers_configured_then_install_folders_then_path(self) -> None:
+        program_files = self.root / "Program Files"
+        installed = program_files / "LibreOffice" / "program" / "soffice.exe"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(b"MZ")
+        chosen = self.root / "Hordozhato" / "program" / "soffice.exe"
+        chosen.parent.mkdir(parents=True)
+        chosen.write_bytes(b"MZ")
+        environment = {"ProgramFiles": str(program_files), "ProgramFiles(x86)": str(self.root / "nincs")}
+        with mock.patch.dict(os.environ, environment), mock.patch("shutil.which", return_value=None):
+            self.assertEqual(libreoffice.soffice_path(str(chosen)), str(chosen))
+            # A configured path that is not soffice falls back to the installed one.
+            self.assertEqual(libreoffice.soffice_path(str(self.root / "notepad.exe")), str(installed))
+            installed.unlink()
+            self.assertIsNone(libreoffice.soffice_path())
+        with mock.patch.dict(os.environ, environment), mock.patch("shutil.which", return_value=r"D:\LO\soffice.exe"):
+            self.assertEqual(libreoffice.soffice_path(), r"D:\LO\soffice.exe")
+
+    def test_input_extension_follows_the_content(self) -> None:
+        self.assertEqual(libreoffice.input_extension("docx", "Szerzodes.DOCM"), "docm")
+        self.assertEqual(libreoffice.input_extension("docx", "szamla.pdf"), "docx")
+        self.assertEqual(libreoffice.input_extension("ole", "regi.xls"), "xls")
+        self.assertEqual(libreoffice.input_extension("rtf", "level"), "rtf")
+        entries = describe([
+            Attachment("a.docm", "", self.fixture("macro.docm")),
+            Attachment("b.odt", "", self.fixture("macro-onload.odt")),
+            Attachment("c.pdf", "", self.fixture("sample.pdf")),
+            Attachment("d.doc.exe", "", b"MZ" + b"\x00" * 60),
+        ])
+        self.assertEqual([entry["exact"] for entry in entries], [True, True, False, False])
+
+    def test_conversion_runs_headless_with_a_macro_locked_throwaway_profile(self) -> None:
+        work_dir = self.root / "tmp" / "munka"
+        seen: dict[str, object] = {}
+
+        class FakeProcess:
+            returncode = 0
+
+            def __init__(self, arguments: list[str], **options: object) -> None:
+                seen["arguments"] = arguments
+                seen["options"] = options
+                seen["profile"] = (work_dir / "profile" / "user" / "registrymodifications.xcu").read_text(encoding="utf-8")
+                seen["input"] = Path(arguments[-1]).read_bytes()
+                outdir = Path(arguments[arguments.index("--outdir") + 1])
+                (outdir / f"{Path(arguments[-1]).stem}.pdf").write_bytes(b"%PDF-1.7 pontos")
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                seen["timeout"] = timeout
+                return b"", b""
+
+        with mock.patch("subprocess.Popen", FakeProcess):
+            pdf = libreoffice.convert_to_pdf(r"C:\LO\soffice.exe", b"docx-bajtok", "docx", "szamla.pdf", work_dir)
+        self.assertEqual(pdf, b"%PDF-1.7 pontos")
+        arguments = seen["arguments"]
+        self.assertEqual(arguments[0], r"C:\LO\soffice.exe")
+        self.assertTrue(arguments[1].startswith("-env:UserInstallation=file:///"))
+        for flag in ("--headless", "--norestore", "--nolockcheck"):
+            self.assertIn(flag, arguments)
+        self.assertEqual(arguments[arguments.index("--convert-to") + 1], "pdf")
+        self.assertTrue(arguments[-1].endswith("dokumentum.docx"))
+        self.assertEqual(seen["input"], b"docx-bajtok")
+        self.assertEqual(seen["timeout"], 60.0)
+        self.assertIn('oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value>', seen["profile"])
+        self.assertIn('oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value>', seen["profile"])
+        self.assertFalse(work_dir.exists())
+
+    def test_timeout_kills_libreoffice_and_failure_is_reported(self) -> None:
+        work_dir = self.root / "tmp" / "lassu"
+
+        class HangingProcess:
+            pid = 4242
+            returncode = None
+            killed = False
+
+            def __init__(self, arguments: list[str], **options: object) -> None:
+                pass
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                if timeout is not None and not HangingProcess.killed:
+                    raise subprocess.TimeoutExpired("soffice", timeout)
+                return b"", b""
+
+            def kill(self) -> None:
+                HangingProcess.killed = True
+
+        with mock.patch("subprocess.Popen", HangingProcess), mock.patch("subprocess.run") as run:
+            with self.assertRaisesRegex(libreoffice.ConversionError, "időkorlát"):
+                libreoffice.convert_to_pdf("soffice", b"x", "docx", "a.docx", work_dir, timeout=0.1)
+        self.assertTrue(HangingProcess.killed)
+        if os.name == "nt":
+            self.assertEqual(run.call_args.args[0][:2], ["taskkill", "/PID"])
+        self.assertFalse(work_dir.exists())
+
+        class FailingProcess:
+            returncode = 1
+
+            def __init__(self, arguments: list[str], **options: object) -> None:
+                pass
+
+            def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+                return b"", b"Error: source file could not be loaded\n"
+
+        with mock.patch("subprocess.Popen", FailingProcess):
+            with self.assertRaisesRegex(libreoffice.ConversionError, "could not be loaded"):
+                libreoffice.convert_to_pdf("soffice", b"x", "rtf", "a.rtf", self.root / "tmp" / "hibas")
+        with self.assertRaises(ValueError):
+            libreoffice.convert_to_pdf("soffice", b"x", "pdf", "a.pdf", self.root / "tmp" / "pdf")
+
+    @unittest.skipUnless(libreoffice.soffice_path(), "LibreOffice is not installed")
+    def test_real_libreoffice_draws_documents_without_running_macros(self) -> None:
+        marker = self.root / "makro-lefutott.txt"
+        with mock.patch.dict(os.environ, {"MAILSCOPE_MACRO_MARKER": str(marker)}):
+            pdf = libreoffice.convert_to_pdf(
+                libreoffice.soffice_path(), self.fixture("macro-onload.odt"), "odf", "makro.odt", self.root / "tmp" / "odt"
+            )
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn("Kitalalt dokumentum", render.render_pdf(pdf)["text"])
+        self.assertFalse(marker.exists(), "the document's Basic macro ran during conversion")
+        docm = libreoffice.convert_to_pdf(
+            libreoffice.soffice_path(), self.fixture("macro.docm"), "docx", "macro.docm", self.root / "tmp" / "docm"
+        )
+        self.assertTrue(docm.startswith(b"%PDF"))
 
 
 if __name__ == "__main__":

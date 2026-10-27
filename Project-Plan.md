@@ -152,7 +152,11 @@ Forrás lehet:
       saját, `olefile`-alapú MAPI-olvasóval) beágyazott fával (`#/melleklet/<levél>/2/0/3`),
       kibontás a memóriában, ZIP-bomba-védelem (5 szint, 10 000 bejegyzés, 2 GB, 100:1),
       munkamenetig élő jelszó, a beágyazott gyanús fájl a levél jelzésében is.
-   4. [ ] LibreOffice „Pontos nézet”.
+   4. [x] LibreOffice „Pontos nézet” (telepített LibreOffice, nem csomagoljuk): PDF-be alakítás
+      eldobható, makrótiltó profillal, 60 s időkorláttal, a `.mailscope\tmp\` alatt; az eredmény
+      a PDF-nézőben, gyorsítótárazva. DOC/PPT/PPTX/RTF/ODF alapból így nyílik. A
+      `soffice.exe` helye kiválasztható (felhasználói `settings.json`). A valódi
+      LibreOffice-teszt (makrós ODT) kihagyódik, ha nincs LibreOffice a gépen.
    5. [ ] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható.
 
 ## Mérföldkövek

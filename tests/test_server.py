@@ -16,6 +16,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from attachments.libreoffice import ConversionError
 from indexer import IndexDatabase, IndexingService, PersonDirectory
 from server import ApiError, MailScopeApplication, create_server
 from server.__main__ import main as run_server_main
@@ -738,6 +739,94 @@ class ServerTests(unittest.TestCase):
         """Reject attempts to expose this local mailbox API on a network interface."""
         with self.assertRaises(ValueError):
             create_server(host="0.0.0.0", port=8765)
+
+    def test_exact_view_converts_once_and_needs_libreoffice(self) -> None:
+        """Pontos nézet: LibreOffice PDF pages, text and cache; 409 without LibreOffice; path setting."""
+        fixtures = Path(__file__).parent / "fixtures" / "attachments"
+        message = EmailMessage()
+        message["From"] = "Teszt Antal <antal@pelda.hu>"
+        message["To"] = "Teszt Anna <anna@pelda.hu>"
+        message["Subject"] = "Pontos nézet"
+        message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+        message["Message-ID"] = "<exact@example.test>"
+        message.set_content("Csatolva.")
+        for name in ("sample.docx", "macro-onload.odt", "sample.pdf"):
+            message.add_attachment((fixtures / name).read_bytes(), maintype="application", subtype="octet-stream", filename=name)
+        self.source_path.write_bytes(
+            b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + message.as_bytes(policy=policy.SMTP)
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        message_id = int(
+            self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=True,
+                deleted_only=False, item_type=None, include_duplicates=False, limit=5, offset=0,
+            )[0]["message_id"]
+        )
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+
+        def get(path: str) -> tuple[int, bytes]:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            body = response.read()
+            connection.close()
+            return response.status, body
+
+        with patch.object(MailScopeApplication, "libreoffice_path", return_value=None):
+            listing = json.loads(get(f"/api/messages/{message_id}/attachments")[1])
+            status, body = get(f"/api/attachments/{message_id}/1/preview?exact=1")
+        self.assertFalse(listing["exact_available"])
+        self.assertEqual([item["exact"] for item in listing["attachments"]], [True, True, False])
+        self.assertEqual(listing["attachments"][1]["view"], "none")
+        self.assertEqual(status, 409)
+        self.assertIn("LibreOffice", json.loads(body)["error"])
+
+        converted = (fixtures / "sample.pdf").read_bytes()
+        with patch.object(MailScopeApplication, "libreoffice_path", return_value=r"C:\LO\program\soffice.exe"), \
+                patch("attachments.service.convert_to_pdf", return_value=converted) as convert:
+            self.assertTrue(json.loads(get(f"/api/messages/{message_id}/attachments")[1])["exact_available"])
+            preview = json.loads(get(f"/api/attachments/{message_id}/0/preview?exact=1&page=1")[1])
+            self.assertEqual((preview["kind"], preview["page"], preview["pages"], preview["exact"]), ("pdf", 1, 2, True))
+            self.assertIn("exact=1", preview["image_url"])
+            status, png = get(preview["image_url"])
+            self.assertEqual(status, 200)
+            self.assertTrue(png.startswith(b"\x89PNG"))
+            text = json.loads(get(f"/api/attachments/{message_id}/0/text?exact=1")[1])
+            self.assertIn("Fizetesi utemezes", text["pages"][0])
+            # The built-in view stays the default without exact=1.
+            self.assertEqual(json.loads(get(f"/api/attachments/{message_id}/0/preview")[1])["kind"], "docx")
+            self.assertEqual(get(f"/api/attachments/{message_id}/2/preview?exact=1")[0], 404)
+        self.assertEqual(convert.call_count, 1)
+        soffice, data, real_kind, name, work_dir = convert.call_args.args
+        self.assertEqual((soffice, real_kind, name), (r"C:\LO\program\soffice.exe", "docx", "sample.docx"))
+        self.assertEqual(data, (fixtures / "sample.docx").read_bytes())
+        self.assertEqual(work_dir.parent, self.case_directory / ".mailscope" / "tmp")
+        self.assertTrue(any((self.case_directory / ".mailscope" / "cache" / "attachments").rglob("exact.pdf")))
+
+        with patch("attachments.service.convert_to_pdf", side_effect=ConversionError("A LibreOffice-átalakítás túllépte az időkorlátot (60 s), ezért leállítottuk.")), \
+                patch.object(MailScopeApplication, "libreoffice_path", return_value=r"C:\LO\program\soffice.exe"):
+            status, body = get(f"/api/attachments/{message_id}/1/preview?exact=1")
+        self.assertEqual(status, 422)
+        self.assertIn("időkorlát", json.loads(body)["error"])
+        self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
+
+        settings_application = MailScopeApplication(recent_cases_file=self.root / "profil" / "recent.json")
+        with self.assertRaises(ValueError):
+            settings_application.set_libreoffice_path(str(self.source_path))
+        soffice = self.root / "LibreOffice" / "program" / "soffice.exe"
+        soffice.parent.mkdir(parents=True)
+        soffice.write_bytes(b"MZ")
+        self.assertEqual(settings_application.set_libreoffice_path(str(soffice))["path"], str(soffice.resolve()))
+        self.assertEqual(settings_application.libreoffice_path(), str(soffice.resolve()))
+        self.assertIn("libreoffice_path", (self.root / "profil" / "settings.json").read_text(encoding="utf-8"))
+        self.assertIsNone(settings_application.set_libreoffice_path("")["configured"])
 
     def test_application_opens_the_actual_local_server_address(self) -> None:
         """Open the browser automatically using the listener's actual port."""

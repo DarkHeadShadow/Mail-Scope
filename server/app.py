@@ -45,12 +45,17 @@ from sources.discover import (
 )
 from sources.reader_factory import open_source
 from version import __version__
+from attachments.libreoffice import ConversionError, soffice_path
 from attachments.sandbox import AttachmentProcessingError
 from attachments.service import (
     PreviewCache,
     analysis as attachment_analysis,
     describe,
     document_html,
+    exact_image,
+    exact_pdf,
+    exact_preview,
+    exact_text,
     expand as expand_attachment,
     extracted_text,
     image_png,
@@ -117,7 +122,7 @@ def _browse_local_path(kind: str, initial_path: str) -> str:
     """Show a native Windows picker for a directory or a supported mail file."""
     from tkinter import Tk, filedialog
 
-    if kind not in {"directory", "file"}:
+    if kind not in {"directory", "file", "soffice"}:
         raise ValueError("A tallózás típusa directory vagy file legyen.")
 
     initial_directory = ""
@@ -143,6 +148,13 @@ def _browse_local_path(kind: str, initial_path: str) -> str:
                 title="Mappa kiválasztása",
                 initialdir=initial_directory or None,
                 mustexist=True,
+            )
+        if kind == "soffice":
+            return filedialog.askopenfilename(
+                parent=root,
+                title="A LibreOffice soffice.exe programjának kiválasztása",
+                initialdir=initial_directory or None,
+                filetypes=(("LibreOffice", "soffice.exe"), ("Programok", "*.exe")),
             )
         return filedialog.askopenfilename(
             parent=root,
@@ -172,6 +184,8 @@ class MailScopeApplication:
     def __init__(self, recent_cases_file: Path | None = None) -> None:
         """Start with no active case; optionally remember recent cases in a profile file."""
         self.recent_cases_file = recent_cases_file
+        # Per-user settings (the LibreOffice path) live next to the recent-case list.
+        self.settings_file = recent_cases_file.with_name("settings.json") if recent_cases_file else None
         self._recent_counts: tuple[int, int] | None = None
         self._lock = threading.RLock()
         self.case_directory: Path | None = None
@@ -346,6 +360,54 @@ class MailScopeApplication:
             database.set_metadata_value(_VERIFICATION_MODE_KEY, mode)
             logger.info("Source verification mode for this case set to: %s", mode)
             return self.status()
+
+    def _read_settings(self) -> dict[str, Any]:
+        """Load the per-user settings, ignoring a missing or damaged file."""
+        if self.settings_file is None:
+            return {}
+        try:
+            settings = json.loads(self.settings_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return settings if isinstance(settings, dict) else {}
+
+    def libreoffice_path(self) -> str | None:
+        """Return the LibreOffice used for "Pontos nézet": the chosen one, else an installed one."""
+        configured = self._read_settings().get("libreoffice_path")
+        return soffice_path(configured if isinstance(configured, str) else None)
+
+    def libreoffice_status(self) -> dict[str, Any]:
+        """Describe whether "Pontos nézet" is available and which LibreOffice it uses."""
+        configured = self._read_settings().get("libreoffice_path")
+        return {
+            "path": self.libreoffice_path(),
+            "configured": configured if isinstance(configured, str) else None,
+        }
+
+    def set_libreoffice_path(self, path: str) -> dict[str, Any]:
+        """Remember a LibreOffice soffice.exe chosen by the user, or forget it with ""."""
+        if path:
+            candidate = Path(path)
+            if (
+                not candidate.is_absolute()
+                or not candidate.is_file()
+                or candidate.name.casefold() not in {"soffice.exe", "soffice.com"}
+            ):
+                raise ValueError("Válassza ki a LibreOffice soffice.exe programját (a LibreOffice program mappájából).")
+            path = str(candidate.resolve())
+        if self.settings_file is None:
+            raise ApiError(HTTPStatus.CONFLICT, "A beállítások ebben a futásban nem menthetők.")
+        settings = self._read_settings()
+        if path:
+            settings["libreoffice_path"] = path
+        else:
+            settings.pop("libreoffice_path", None)
+        self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.settings_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(self.settings_file)
+        logger.info("LibreOffice for the exact view set to: %s", path or "(automatic)")
+        return self.libreoffice_status()
 
     def recent_cases(self) -> list[dict[str, Any]]:
         """Return up to five recently opened case folders that still exist."""
@@ -1110,7 +1172,11 @@ class MailScopeApplication:
     def message_attachments(self, message_id: int) -> dict[str, Any]:
         """List a message's attachments with their real types and warnings."""
         loaded = self._load_attachments(message_id)
-        return {"message": loaded["summary"], "attachments": loaded["entries"]}
+        return {
+            "message": loaded["summary"],
+            "attachments": loaded["entries"],
+            "exact_available": self.libreoffice_path() is not None,
+        }
 
     def attachment_info(self, message_id: int, path: str) -> dict[str, Any]:
         """Return the analyst data sheet of one attachment."""
@@ -1147,11 +1213,34 @@ class MailScopeApplication:
             "analysis_error": details.get("analysis_error"),
         }
 
+    def _exact_pdf(self, entry: dict[str, Any], data: bytes) -> bytes:
+        """Return the LibreOffice PDF of an attachment ("Pontos nézet"), converting it once."""
+        work_dir = self._require_case_directory() / ".mailscope" / "tmp" / uuid.uuid4().hex
+        try:
+            return exact_pdf(
+                PreviewCache(self._require_case_directory()), entry, data, self.libreoffice_path(), work_dir
+            )
+        except LookupError as error:
+            raise ApiError(HTTPStatus.CONFLICT, str(error)) from error
+        except ValueError as error:
+            raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from error
+        except (ConversionError, OSError) as error:
+            logger.warning("LibreOffice conversion failed: %s: %s", entry["trail"], error)
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+
     def attachment_preview(
-        self, message_id: int, path: str, page: int, sheet: int = 0
+        self, message_id: int, path: str, page: int, sheet: int = 0, exact: bool = False
     ) -> dict[str, Any]:
         """Render or fetch the cached preview of one attachment in the isolated worker."""
         loaded, entry, data = self._attachment(message_id, path)
+        if exact:
+            pdf = self._exact_pdf(entry, data)
+            try:
+                result = exact_preview(PreviewCache(self._require_case_directory()), entry, pdf, page)
+            except AttachmentProcessingError as error:
+                raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+            result["image_url"] = f"/api/attachments/{message_id}/{path}/image?exact=1&page={result['page']}"
+            return result
         if entry["view"] == "archive":
             return {"kind": "archive", **self.attachment_children(message_id, path)}
         cache = PreviewCache(self._require_case_directory())
@@ -1168,10 +1257,14 @@ class MailScopeApplication:
             result["document_url"] = f"/api/attachments/{message_id}/{path}/document"
         return result
 
-    def attachment_image(self, message_id: int, path: str, page: int) -> bytes:
+    def attachment_image(self, message_id: int, path: str, page: int, exact: bool = False) -> bytes:
         """Return the re-encoded PNG of an image attachment or a rendered PDF page."""
         _, entry, data = self._attachment(message_id, path)
         try:
+            if exact:
+                return exact_image(
+                    PreviewCache(self._require_case_directory()), entry, self._exact_pdf(entry, data), page
+                )
             return image_png(PreviewCache(self._require_case_directory()), entry, data, page)
         except AttachmentProcessingError as error:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
@@ -1188,10 +1281,14 @@ class MailScopeApplication:
         except ValueError as error:
             raise ApiError(HTTPStatus.NOT_FOUND, str(error)) from error
 
-    def attachment_text(self, message_id: int, path: str) -> dict[str, Any]:
-        """Return the extracted text of an attachment (per page for PDF)."""
+    def attachment_text(self, message_id: int, path: str, exact: bool = False) -> dict[str, Any]:
+        """Return the extracted text of an attachment (per page for PDF and the exact view)."""
         _, entry, data = self._attachment(message_id, path)
         try:
+            if exact:
+                return exact_text(
+                    PreviewCache(self._require_case_directory()), entry, self._exact_pdf(entry, data)
+                )
             return extracted_text(PreviewCache(self._require_case_directory()), entry, data)
         except AttachmentProcessingError as error:
             raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
@@ -1578,15 +1675,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 query = parse_qs(request.query)
                 page = _optional_integer(query, "page") or 0
                 sheet = _optional_integer(query, "sheet") or 0
+                exact = _single_value(query, "exact") == "1"
                 if action == "info":
                     self._send_json(HTTPStatus.OK, self.server.application.attachment_info(message_id, path))
                 elif action == "preview":
                     self._send_json(
                         HTTPStatus.OK,
-                        self.server.application.attachment_preview(message_id, path, page, sheet),
+                        self.server.application.attachment_preview(message_id, path, page, sheet, exact),
                     )
                 elif action == "text":
-                    self._send_json(HTTPStatus.OK, self.server.application.attachment_text(message_id, path))
+                    self._send_json(HTTPStatus.OK, self.server.application.attachment_text(message_id, path, exact))
                 elif action == "children":
                     self._send_json(HTTPStatus.OK, self.server.application.attachment_children(message_id, path))
                 elif action == "document":
@@ -1599,7 +1697,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_bytes(
                         HTTPStatus.OK,
-                        self.server.application.attachment_image(message_id, path, page),
+                        self.server.application.attachment_image(message_id, path, page, exact),
                         "image/png",
                     )
             elif request.path.startswith("/api/messages/"):
@@ -1759,6 +1857,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.edit_person(
                     action, _positive_integer(raw_id), payload
                 )
+            elif path == "/api/settings/libreoffice":
+                if payload.get("pick"):
+                    chosen = _browse_local_path("soffice", self.server.application.libreoffice_path() or "")
+                    response = (
+                        self.server.application.set_libreoffice_path(chosen)
+                        if chosen else self.server.application.libreoffice_status()
+                    )
+                else:
+                    value = payload.get("path", "")
+                    if value != "":
+                        raise ValueError("A LibreOffice helyét a tallózóval válassza ki.")
+                    response = self.server.application.set_libreoffice_path("")
             elif path == "/api/settings/verification":
                 response = self.server.application.set_verification_mode(
                     _required_string(payload, "mode")

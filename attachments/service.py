@@ -5,6 +5,7 @@ __author__ = "Bálint Szabolcs"
 import hashlib
 import json
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from sources.models import Attachment
 from . import render as _render  # noqa: F401 – loaded by name in the worker; keeps it in the build
 from .containers import seven_zip_path
 from .detect import detect
+from .libreoffice import EXACT_KINDS, convert_to_pdf
 from .sandbox import run_isolated
 
 
@@ -50,6 +52,9 @@ def describe(attachments: list[Attachment], parent: str = "", parent_trail: str 
                 "warnings": warnings,
                 "sha256": hashlib.sha256(attachment.data).hexdigest(),
                 "too_large": len(attachment.data) > PREVIEW_LIMIT_BYTES,
+                # LibreOffice "Pontos nézet" can draw this one (if LibreOffice is installed).
+                "exact": info.kind in EXACT_KINDS and not info.executable and not attachment.error
+                and len(attachment.data) <= PREVIEW_LIMIT_BYTES,
             }
         )
     return entries
@@ -89,7 +94,7 @@ def expand(entry: dict[str, Any], data: bytes, password: str | None, work_dir: P
         if item["data"] is None:
             # Not unpacked: the directory size is known, the content is not.
             child.update(size=item["size"], sha256="", view="none", container=None,
-                         real_kind="unknown", real_label="ismeretlen (nincs kibontva)", warnings=[])
+                         real_kind="unknown", real_label="ismeretlen (nincs kibontva)", warnings=[], exact=False)
             child["reason"] = item["error"] or "A fájl nincs kibontva."
         elif item["error"]:
             child["warnings"].insert(0, item["error"])
@@ -245,6 +250,61 @@ def image_png(cache: PreviewCache, entry: dict[str, Any], data: bytes, page: int
     if png is None:
         raise ValueError("A kép előnézete nem készült el.")
     return png
+
+
+_exact_locks: dict[str, threading.Lock] = {}
+_exact_locks_guard = threading.Lock()
+
+
+def exact_pdf(cache: PreviewCache, entry: dict[str, Any], data: bytes, soffice: str | None, work_dir: Path) -> bytes:
+    """Return the LibreOffice PDF of an Office attachment, converting it once per SHA-256."""
+    if not entry.get("exact"):
+        raise ValueError("Ez a melléklet nem jeleníthető meg Pontos nézetben.")
+    sha256 = entry["sha256"]
+    with _exact_locks_guard:
+        lock = _exact_locks.setdefault(sha256, threading.Lock())
+    # Parallel requests (page, text) for the same file wait for one conversion.
+    with lock:
+        cached = cache.read(sha256, "exact.pdf")
+        if cached is None:
+            if not soffice:
+                raise LookupError("A Pontos nézethez LibreOffice kell, de a gépen nem található.")
+            cached = convert_to_pdf(soffice, data, entry["real_kind"], entry["name"], work_dir)
+            cache.write(sha256, "exact.pdf", cached)
+    return cached
+
+
+def exact_preview(cache: PreviewCache, entry: dict[str, Any], pdf: bytes, page: int = 0) -> dict[str, Any]:
+    """Render one page of the LibreOffice PDF like a PDF attachment."""
+    sha256 = entry["sha256"]
+    page = max(0, int(page))
+
+    def produce() -> dict[str, Any]:
+        rendered = run_isolated("attachments.render:render_pdf", pdf, page)
+        cache.write(sha256, f"exact-{rendered['page']}.png", rendered.pop("png"))
+        return rendered
+
+    result = _cached_json(cache, sha256, f"exact-{page}.json", produce)
+    result["exact"] = True
+    return result
+
+
+def exact_image(cache: PreviewCache, entry: dict[str, Any], pdf: bytes, page: int = 0) -> bytes:
+    """Return the PNG of one page of the LibreOffice PDF."""
+    meta = exact_preview(cache, entry, pdf, page)
+    png = cache.read(entry["sha256"], f"exact-{meta['page']}.png")
+    if png is None:
+        raise ValueError("A kép előnézete nem készült el.")
+    return png
+
+
+def exact_text(cache: PreviewCache, entry: dict[str, Any], pdf: bytes) -> dict[str, Any]:
+    """Return the per-page text of the LibreOffice PDF for the document search."""
+    result = _cached_json(
+        cache, entry["sha256"], "exact-analysis.json",
+        lambda: run_isolated("attachments.render:analyze", pdf, "pdf"),
+    )
+    return {"pages": result.get("pages_text", []), "text_layer": result.get("text_layer", False)}
 
 
 def _no_preview_reason(entry: dict[str, Any]) -> str:

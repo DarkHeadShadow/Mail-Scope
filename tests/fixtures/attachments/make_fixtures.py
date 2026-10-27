@@ -459,6 +459,59 @@ def _archives(pdf: bytes, xlsx: bytes) -> dict[str, bytes]:
     return files
 
 
+def _odt_with_macro() -> bytes:
+    """Build an ODT whose Basic macro runs on open and writes $MAILSCOPE_MACRO_MARKER.
+
+    The exact-view test converts it with LibreOffice and checks that the
+    marker file never appears, i.e. the macro did not run.
+    """
+    manifest = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">
+ <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>
+ <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="Basic/script-lc.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="Basic/Standard/script-lb.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="Basic/Standard/Module1.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>"""
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:dom="http://www.w3.org/2001/xml-events" office:version="1.2">
+<office:scripts><office:event-listeners><script:event-listener script:language="ooo:script" script:event-name="dom:load" xlink:href="vnd.sun.star.script:Standard.Module1.Marker?language=Basic&amp;location=document" xlink:type="simple"/></office:event-listeners></office:scripts>
+<office:body><office:text><text:p>Kitalalt dokumentum makroval. A Pontos nezet nem futtatja.</text:p></office:text></office:body>
+</office:document-content>"""
+    libraries = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE library:libraries PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "libraries.dtd">
+<library:libraries xmlns:library="http://openoffice.org/2000/library" xmlns:xlink="http://www.w3.org/1999/xlink">
+ <library:library library:name="Standard" library:link="false"/>
+</library:libraries>"""
+    library = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE library:library PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "library.dtd">
+<library:library xmlns:library="http://openoffice.org/2000/library" library:name="Standard" library:readonly="false" library:passwordprotected="false">
+ <library:element library:name="Module1"/>
+</library:library>"""
+    module = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Module1" script:language="StarBasic" script:moduleType="normal">Sub Marker
+  Dim target As String
+  target = Environ(&quot;MAILSCOPE_MACRO_MARKER&quot;)
+  If target &lt;&gt; &quot;&quot; Then
+    Open target For Output As #1
+    Print #1, &quot;ran&quot;
+    Close #1
+  End If
+End Sub
+</script:module>"""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(zipfile.ZipInfo("mimetype", (2023, 5, 10, 12, 0, 0)), "application/vnd.oasis.opendocument.text")
+        for name, text in (
+            ("META-INF/manifest.xml", manifest), ("content.xml", content),
+            ("Basic/script-lc.xml", libraries), ("Basic/Standard/script-lb.xml", library),
+            ("Basic/Standard/Module1.xml", module),
+        ):
+            archive.writestr(zipfile.ZipInfo(name, (2023, 5, 10, 12, 0, 0)), text, compress_type=zipfile.ZIP_DEFLATED)
+    return output.getvalue()
+
+
 def main() -> None:
     """Write every fixture next to this script."""
     text_pages = [
@@ -478,6 +531,7 @@ def main() -> None:
         "macro.docm": _docx(macro=True),
         "sample.xlsx": _xlsx(),
         "macro.xlsm": _xlsx(macro=True),
+        "macro-onload.odt": _odt_with_macro(),
         "page.html": (
             "<!doctype html><html><head><title>Kitalált hírlevél</title>"
             "<style>h1{color:#2a7}</style></head><body>"

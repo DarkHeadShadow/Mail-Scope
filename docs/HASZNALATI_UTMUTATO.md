@@ -406,7 +406,8 @@ az 1. fájl.
 | PDF | oldalkép nagyítással és oldalléptetéssel; az oldal szövegrétege kiemeléssel; a keresés az összes oldalt átnézi („Találat: 2., 5. oldal”); szövegréteg nélküli (szkennelt) PDF-nél jelzés: OCR nélkül nem kinyerhető |
 | Word (DOCX, DOCM) | **Formázott** fül: címsorok, listák, táblázatok, képek tisztított, homokozott keretben; **Szöveg** fül a kereséshez |
 | Excel (XLSX, XLSM) | munkalapfülek (a rejtett és nagyon rejtett lapok is, jelölve), képletsor a kijelölt cellához, **Képletek** kapcsoló, a rejtett sorok és oszlopok halványan, csíkozva, a megjegyzéses cellák sarokjellel |
-| Régi Excel (XLS) | munkalapok értékekkel (képletek nélkül) |
+| Régi Excel (XLS) | munkalapok értékekkel (a képletek a Pontos nézetben látszanak) |
+| Régi Word és PowerPoint (DOC, PPT), PPTX, RTF, OpenDocument | Pontos nézet LibreOffice-szal (lásd lent); enélkül adatlap és mentés |
 | HTML | **Formázott** fül tisztítva, homokozott keretben; **Szöveg** és **Forrás** fül |
 | ZIP, 7z, RAR, gzip | tartalomjegyzék (fájl, méret, tömörített méret, valódi típus, módosítás, állapot); a fájlok a táblázatból vagy a fából nyithatók meg, kicsomagolás nélkül, a memóriában |
 | Csatolt levél (EML, MSG) | fejlécek (feladó, címzett, dátum, tárgy, Message-ID), törzs (**Formázott** fül tisztítva, homokozott keretben, ha van HTML-törzs; **Szöveg** fül), a levél saját mellékletei |
@@ -416,8 +417,33 @@ A formázott (Word, HTML) nézet egy elkülönített, homokozott keretben jeleni
 navigáció és külső tartalom nem működik benne, a linkek célja eltávolítva. Kereséskor a program
 az előnézetet a **Szöveg** fülre váltja.
 
-A régi DOC/PPT/RTF megjelenítése és a LibreOffice-os „Pontos nézet” a következő szakaszban
-készül el. Addig ezeknél az adatlap és a mentés érhető el.
+#### Pontos nézet (LibreOffice)
+
+Ha a gépen telepítve van a LibreOffice, az Office-mellékleteknél (Word, Excel, PowerPoint,
+OpenDocument, RTF, régi DOC/XLS/PPT) az előnézet fölött két gomb jelenik meg:
+**Beépített nézet** és **Pontos nézet (LibreOffice)**.
+
+- **Mit mutat:** a LibreOffice a dokumentumot PDF-be alakítja, és a program ezt a PDF-nézővel
+  jeleníti meg (oldalléptetés, nagyítás, szövegréteg, keresés az összes oldalon). Így az
+  oldaltördelés, a betűtípusok és a régi XLS képletei is az eredetihez hasonlóan látszanak.
+- **Beépített nézet nélküli formátumok** (régi DOC és PPT, RTF, PPTX, OpenDocument) a Pontos
+  nézetben nyílnak meg, ha van LibreOffice. LibreOffice nélkül ezeknél az adatlap és a mentés
+  érhető el.
+- **Biztonság:** a LibreOffice ablak nélkül fut, minden átalakításhoz saját, eldobható
+  beállításokkal, amelyekben a makrók le vannak tiltva, így a dokumentum makrói nem futnak
+  le. Az ideiglenes fájlok az ügy `.mailscope\tmp\` mappájába kerülnek, és az
+  átalakítás után törlődnek. Az eredmény-PDF a gyorsítótárba kerül, így a második megnyitás
+  azonnali.
+- **Időkorlát:** egy átalakítás legfeljebb 60 másodpercig tarthat; utána a program leállítja a
+  LibreOffice-t, és hibaüzenetet ad. A Beépített nézet ekkor is elérhető.
+- **Hol keresi a program:** `C:\Program Files\LibreOffice\program\soffice.exe`, az x86-os
+  változat helye, majd a `PATH`. Ha máshova telepítette (vagy hordozható változatot
+  használ), a letiltott Pontos nézet gomb melletti **LibreOffice megkeresése…** gombbal
+  kiválaszthatja a `soffice.exe` programot. A program ezt a felhasználói profilban
+  (`%APPDATA%\Mail-Scope\settings.json`) jegyzi meg, nem az ügyben.
+
+A Mail-Scope a LibreOffice-t nem tartalmazza és nem telepíti; ha szükséges, a
+[libreoffice.org](https://www.libreoffice.org/) oldalról tölthető le.
 
 #### Archívumok és csatolt levelek
 
