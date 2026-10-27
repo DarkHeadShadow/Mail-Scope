@@ -29,8 +29,8 @@ jobs:
       - name: Run test suite
         run: py -3.13 -m unittest discover -v
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  # Builds the application and installer on every push; publishes them for v* tags.
+  build:
     needs: tests
     runs-on: windows-latest
     permissions:
@@ -45,21 +45,44 @@ jobs:
           python-version: "3.13"
           architecture: x64
 
-      - name: Build Windows application
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows application and installer
         run: .\build_windows.bat
 
       - name: Package onedir application
         run: Compress-Archive -Path .\dist\Mail-Scope -DestinationPath .\dist\Mail-Scope-windows-x64.zip
 
+      - name: Check installer
+        run: |
+          if (-not (Test-Path .\dist\Mail-Scope-Setup-*-x64.exe)) {
+            Write-Error "The installer was not built."
+            exit 1
+          }
+
+      - name: Keep build for download
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mail-Scope-windows-x64
+          path: |
+            dist/Mail-Scope-windows-x64.zip
+            dist/Mail-Scope-Setup-*-x64.exe
+          retention-days: 14
+
       - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $setup = Get-ChildItem .\dist\Mail-Scope-Setup-*-x64.exe | Select-Object -First 1
+          $assets = @(".\dist\Mail-Scope-windows-x64.zip", $setup.FullName)
           gh release view "$env:GITHUB_REF_NAME" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "$env:GITHUB_REF_NAME" ".\dist\Mail-Scope-windows-x64.zip" --clobber
+            gh release upload "$env:GITHUB_REF_NAME" @assets --clobber
           } else {
-            gh release create "$env:GITHUB_REF_NAME" ".\dist\Mail-Scope-windows-x64.zip" --generate-notes --verify-tag
+            gh release create "$env:GITHUB_REF_NAME" @assets --generate-notes --verify-tag
           }
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE

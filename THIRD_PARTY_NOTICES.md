@@ -66,3 +66,9 @@ The optional “Pontos nézet” (exact view) of Office attachments uses LibreOf
 (MPL-2.0) only when the user has installed it; Mail-Scope runs the installed
 `soffice.exe` as a separate program to convert a copy to PDF and does not ship,
 link or modify LibreOffice.
+
+The Mail-Scope installer does not contain 7-Zip or LibreOffice. When the user
+selects them during setup, it downloads the official, unmodified installers
+from their publishers (7-Zip from github.com/ip7z/7zip, LibreOffice from
+download.documentfoundation.org) and runs them; they are installed as separate
+programs under their own licenses and are not removed with Mail-Scope.

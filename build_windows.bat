@@ -42,3 +42,25 @@ call ".venv\Scripts\python.exe" -m PyInstaller ^
 if errorlevel 1 exit /b 1
 
 echo Build complete: dist\Mail-Scope\Mail-Scope.exe
+
+rem Build the installer when Inno Setup 6 is available (INNO_SETUP_COMPILER may point to ISCC.exe).
+set "ISCC="
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if defined INNO_SETUP_COMPILER set "ISCC=%INNO_SETUP_COMPILER%"
+if not defined ISCC goto no_installer
+
+set "VERSION="
+for /f "usebackq delims=" %%v in (`.venv\Scripts\python.exe -c "from version import __version__; print(__version__)"`) do set "VERSION=%%v"
+if not defined VERSION (
+    echo The application version could not be read from version.py.
+    exit /b 1
+)
+call "%ISCC%" /Qp /DAppVersion=%VERSION% installer\Mail-Scope.iss
+if errorlevel 1 exit /b 1
+echo Installer complete: dist\Mail-Scope-Setup-%VERSION%-x64.exe
+exit /b 0
+
+:no_installer
+echo Inno Setup 6 was not found, so the installer was not built; the application is in dist\Mail-Scope.
+exit /b 0

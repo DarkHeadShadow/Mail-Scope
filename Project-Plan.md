@@ -196,6 +196,10 @@ Forrás lehet:
    tartalmaz; a kitalált adatokkal készült keresési képernyőkép megtalálható a
    `docs/screenshots/` mappában. A projektlicenc kiválasztása a kiadás előtt pótlandó.
 8. Felkészítés a GitHubra (lásd lent), első kiadás.
+   - [x] Telepítő (Inno Setup, `installer/Mail-Scope.iss`): Program Files, Start menü;
+     választhatóan a legfrissebb hivatalos 7-Zip (GitHub-kiadás SHA-256-tal) és LibreOffice
+     Still ág (TDF, SHA-256 és digitális aláírás) letöltése és csendes telepítése; hiba esetén a
+     Mail-Scope akkor is feltelepül. A CI minden feltöltéskor elkészíti, és a kiadáshoz csatolja.
 9. Melléklet-nézegető a 4. képernyő szerint (`docs/feladatok/melleklet-nezegeto.md`):
    formátumonkénti előnézet elkülönített, időkorlátos feldolgozással, opcionális LibreOffice,
    elemzői adatlap, mentés, kapcsolható melléklet-szöveg az FTS-ben.

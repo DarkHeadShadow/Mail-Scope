@@ -44,10 +44,30 @@ postafiókból származnak.
 
 ## 2. Indítás és leállítás
 
+### Telepítés
+
+Futtassa a `Mail-Scope-Setup-<verzió>-x64.exe` telepítőt. A telepítő rendszergazdai jogot kér, és a
+programot a `C:\Program Files\Mail-Scope` mappába telepíti, Start menü-bejegyzéssel.
+
+A telepítő két kiegészítőt is felkínál, ha még nincsenek fent a gépen:
+
+- **7-Zip:** ezzel nyílnak meg a RAR-archívumok (és az AES-titkosítású ZIP-ek). Kb. 2 MB.
+- **LibreOffice (Still ág):** ezzel működik a **Pontos nézet** (lásd a mellékletnézegetőnél). Kb.
+  370 MB, a telepítése néhány percig tart.
+
+Ha bejelöli őket, a telepítő a hivatalos helyről letölti a legfrissebb kiadásukat, ellenőrzi őket
+(SHA-256, a LibreOffice-nál a digitális aláírást is), majd csendben telepíti. A LibreOffice-t úgy
+telepíti, hogy a Word- és Excel-fájlok továbbra is a Microsoft Office-szal nyíljanak meg, és nem
+tesz ikont az asztalra. Ehhez internetkapcsolat kell. Ha a letöltés nem sikerül, a telepítő ezt
+jelzi, de a Mail-Scope ettől még feltelepül; a kiegészítők később a hivatalos oldalukról is
+telepíthetők, és a Mail-Scope megtalálja őket. A Mail-Scope eltávolítása a 7-Zipet és a
+LibreOffice-t nem távolítja el; ezek a Windows „Alkalmazások” listájából külön távolíthatók el.
+
 ### Indítás
 
-- **Telepített változat:** indítsa el a `Mail-Scope.exe`-t a `Mail-Scope` mappából. A teljes mappát
-  tartsa egyben, mert a felület és a licencfájlok is benne vannak.
+- **Telepített változat:** indítsa el a Mail-Scope-ot a Start menüből (vagy a `Mail-Scope.exe`-t a
+  telepítési mappából). Ha a mappát kézzel másolja, tartsa egyben, mert a felület és a
+  licencfájlok is benne vannak.
 - **Forrásból:** a projekt mappájában PowerShellben:
 
   ```powershell
@@ -446,8 +466,9 @@ OpenDocument, RTF, régi DOC/XLS/PPT) az előnézet fölött két gomb jelenik m
   kiválaszthatja a `soffice.exe` programot. A program ezt a felhasználói profilban
   (`%APPDATA%\Mail-Scope\settings.json`) jegyzi meg, nem az ügyben.
 
-A Mail-Scope a LibreOffice-t nem tartalmazza és nem telepíti; ha szükséges, a
-[libreoffice.org](https://www.libreoffice.org/) oldalról tölthető le.
+A Mail-Scope a LibreOffice-t nem tartalmazza. A telepítő felkínálja a letöltését (lásd
+[Telepítés](#telepítés)), vagy a [libreoffice.org](https://www.libreoffice.org/) oldalról
+bármikor telepíthető.
 
 #### Archívumok és csatolt levelek
 
