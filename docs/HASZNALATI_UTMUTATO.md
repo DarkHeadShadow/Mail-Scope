@@ -244,7 +244,8 @@ listája fölötti **Személy keresése** mezővel név vagy cím szerint szűrh
      szerepelnek, és az egyik a másiknak írt. Az önmagának küldött levél nem számít bele.
    - **Közös levelek (másokkal együtt is)** – minden kijelölt személy szerepel, mások is lehetnek.
    - **Bármelyikük összes levele** – bármelyik kijelölt személyt érintő levél.
-3. **Kezdete / Vége:** időszak (mindkét nap beleszámít).
+3. **Kezdete / Vége:** a vizsgált időszak (mindkét nap beleszámít). Ha valamelyik üres, az időszak
+   az első, illetve az utolsó levél napjáig tart; a választott időszak az eredmény fejlécében látszik.
 4. **Téma / szál:** egy levélszálra szűkít (a lista a betöltés után telik meg).
 5. **Keresés a beszélgetésben:** szöveges szűrés; a találatok kiemelve jelennek meg.
 6. **CC/BCC résztvevők bevonása:** kikapcsolva csak a feladó és a közvetlen (To) címzettek számítanak.
@@ -253,8 +254,8 @@ listája fölötti **Személy keresése** mezővel név vagy cím szerint szűrh
 ### Idővonal
 
 - **Havi aktivitás-sáv:** havonta a levelek száma; egy hónapra kattintva odaugrik.
-- **Napelválasztók** a helyi idő szerint, és „**X nap csend**” jelzés két nap között, ha hosszabb
-  szünet volt.
+- **Napelválasztók** a helyi idő szerint, és „**X nap csend**” jelzés, ha két levél között 10 napnál
+  hosszabb szünet volt. Megadott Kezdete / Vége esetén az időszak eleji és végi szünetet is jelzi.
 - **Kártyák:** személyenként saját szín és oldal (bal/jobb); tárgy, szálazonosító, feladó, címzettek,
   időpont, a törzs eleje.
 - **Teljes üzenet megjelenítése** kibontja a törzset; **Eredeti levél megnyitása** az Archívum lapon
@@ -264,7 +265,7 @@ listája fölötti **Személy keresése** mezővel név vagy cím szerint szűrh
 
 A program a levélszálakat a válaszhivatkozások (`In-Reply-To`, `References`) alapján állítja össze.
 Ha ezek hiányoznak, egy Re:/Fw:/VS: előtagú levelet csak akkor kapcsol tárgy alapján egy szálhoz, ha
-van közös résztvevő, és 60 napon belül volt. Ha egy automatikus rendszer minden értesítést ugyanarra
+van közös résztvevő; időkorlát nélkül, a dátumban legközelebbi ilyen szálhoz. Ha egy automatikus rendszer minden értesítést ugyanarra
 a hiányzó levélre hivatkoztat, a program ezeket tárgy szerint külön szálakra bontja.
 
 ### Export

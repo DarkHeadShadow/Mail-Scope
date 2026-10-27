@@ -9,6 +9,7 @@ Project changes are recorded here. This project has not made a public release ye
 - Added direct MBOX, EML, and optional PST/OST source readers with content-based discovery.
 - Added a case-local SQLite/FTS5 index with resumable background indexing and source SHA-256 verification.
 - Added people, aliases, duplicate merging, and message threading.
+- Subject-only reply threading no longer stops at 60 days; the conversation view examines the selected date range (or first to last message) and marks only silences longer than 10 days, including at the edges of a selected range.
 - Added a loopback-only Hungarian archive and conversation UI.
 - Added detailed AND/OR search groups, case-local labels, and saved searches.
 - Added conversation EML ZIP export with SHA-256 manifest and browser-print PDF workflows.

@@ -1610,7 +1610,7 @@ async function loadConversation() {
   button.disabled = true;
   try {
     state.conversation = await requestJson(`/api/conversation?${params.toString()}`);
-    renderConversation(state.conversation);
+    renderConversation(state.conversation, params.get("date_from"), params.get("date_to"));
     const threadSelect = element("conversation-thread");
     const selectedThread = threadSelect.value;
     threadSelect.replaceChildren(new Option("Minden téma", ""));
@@ -1632,10 +1632,36 @@ async function loadConversation() {
   }
 }
 
+/** Only longer pauses than this are marked as silence in the timeline. */
+const SILENCE_THRESHOLD_DAYS = 10;
+
+/**
+ * Whole days from one YYYY-MM-DD day to a later one.
+ */
+function daysBetween(fromDay, toDay) {
+  return Math.round((Date.parse(`${toDay}T12:00:00Z`) - Date.parse(`${fromDay}T12:00:00Z`)) / 86400000);
+}
+
+/**
+ * A dashed "N nap csend" marker when the pause exceeds the threshold, else null.
+ */
+function silenceGap(silentDays, suffix = "") {
+  if (silentDays <= SILENCE_THRESHOLD_DAYS) {
+    return null;
+  }
+  const gap = document.createElement("div");
+  gap.className = "silence-gap";
+  gap.textContent = `${silentDays.toLocaleString("hu-HU")} nap csend${suffix}`;
+  return gap;
+}
+
 /**
  * Render month activity links and a date-grouped, person-colored timeline.
+ *
+ * The examined period is the selected date range; an open end runs to the
+ * first or last message.
  */
-function renderConversation(result) {
+function renderConversation(result, dateFrom = "", dateTo = "") {
   const container = element("conversation-results");
   container.replaceChildren();
   if (result.messages.length === 0) {
@@ -1646,7 +1672,6 @@ function renderConversation(result) {
   container.className = "conversation-results";
   const summary = document.createElement("div");
   summary.className = "conversation-summary";
-  summary.textContent = `${result.messages.length.toLocaleString("hu-HU")} levél · ${result.people.map((person) => person.display_name).join(" · ")}`;
   container.append(summary);
 
   // Days, silences and months follow the computer's local time, like the
@@ -1660,6 +1685,11 @@ function renderConversation(result) {
       months.set(month, (months.get(month) || 0) + 1);
     }
   });
+  const days = result.messages.map((message) => message.localDay).filter(Boolean).sort();
+  const periodStart = dateFrom || days[0] || "";
+  const periodEnd = dateTo || days[days.length - 1] || "";
+  const period = periodStart || periodEnd ? ` · Vizsgált időszak: ${periodStart || "…"} – ${periodEnd || "…"}` : "";
+  summary.textContent = `${result.messages.length.toLocaleString("hu-HU")} levél · ${result.people.map((person) => person.display_name).join(" · ")}${period}`;
 
   const activity = document.createElement("nav");
   activity.className = "activity-strip";
@@ -1688,24 +1718,25 @@ function renderConversation(result) {
   let currentDay = "";
   result.messages.forEach((message) => {
     if (message.localDay && message.localDay !== currentDay) {
-      const silentDays = currentDay
-        ? Math.round((Date.parse(`${message.localDay}T12:00:00Z`) - Date.parse(`${currentDay}T12:00:00Z`)) / 86400000) - 1
-        : 0;
+      const gap = currentDay
+        ? silenceGap(daysBetween(currentDay, message.localDay) - 1)
+        : dateFrom && silenceGap(daysBetween(dateFrom, message.localDay), " az időszak elején");
       currentDay = message.localDay;
       const heading = document.createElement("h3");
       heading.className = "timeline-day";
       heading.dataset.day = message.localDay;
       heading.textContent = message.localDay;
       timeline.append(heading);
-      if (silentDays > 0) {
-        const gap = document.createElement("div");
-        gap.className = "silence-gap";
-        gap.textContent = `${silentDays} nap csend`;
+      if (gap) {
         timeline.append(gap);
       }
     }
     timeline.append(conversationCard(message, result.people, personColors));
   });
+  const endGap = dateTo && currentDay && silenceGap(daysBetween(currentDay, dateTo), " az időszak végén");
+  if (endGap) {
+    timeline.append(endGap);
+  }
   container.append(timeline);
 }
 

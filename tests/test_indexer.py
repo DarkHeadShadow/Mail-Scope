@@ -567,8 +567,8 @@ class IndexerTests(unittest.TestCase):
             4,
         )
 
-    def test_subject_fallback_needs_reply_prefix_shared_person_and_nearby_date(self) -> None:
-        """Keep recurring subjects apart unless a nearby reply shares a participant."""
+    def test_subject_fallback_needs_reply_prefix_and_shared_person(self) -> None:
+        """Join a reply to the closest-dated same-subject thread it shares a person with."""
         mailbox = self.case_directory / "recurring.mbox"
         mailbox.write_bytes(
             _mail(
@@ -609,6 +609,14 @@ class IndexerTests(unittest.TestCase):
                 subject="",
                 body="Tárgy nélküli második levél.",
             )
+            + _mail(
+                message_id="<re-szamla-kesoi@example.test>",
+                subject="Re: Számla",
+                body="Fél év után is erre a számlára válaszolok.",
+                from_address="anna@pelda.hu",
+                to_address="antal@pelda.hu",
+                sent_date="Mon, 30 Jan 2023 09:00:00 +0000",
+            )
         )
         self.service.index_sources(discover_sources(mailbox))
 
@@ -618,11 +626,13 @@ class IndexerTests(unittest.TestCase):
                 for row in connection.execute("SELECT thread_key FROM messages ORDER BY id")
             ]
 
-        self.assertEqual(len(keys), 6)
+        self.assertEqual(len(keys), 7)
         self.assertNotEqual(keys[0], keys[1])
         self.assertEqual(keys[2], keys[1])
         self.assertNotIn(keys[3], {keys[0], keys[1]})
         self.assertNotEqual(keys[4], keys[5])
+        # More than 60 days later, still the closest July thread.
+        self.assertEqual(keys[6], keys[1])
 
     def test_fixed_in_reply_to_of_notifications_does_not_form_one_thread(self) -> None:
         """Split messages that only share an absent parent but not their subject."""

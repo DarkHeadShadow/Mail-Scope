@@ -94,7 +94,7 @@ A mellékletes leveleknél a találatokban, az Archívum listájában és a besz
 
 - A PST/OST olvasás az opcionális natív `pypff` kötéstől és a libpff képességeitől függ. Sérült vagy nem támogatott Outlook-elemek „hibás” bejegyzésként kerülnek az indexbe; egy sikertelen forrás naplózódik, a többi forrás indexelése folytatódik.
 - Az Exchange (`/O=…/CN=…`) címek csak akkor alakulnak SMTP-címmé, ha a postafiók maga tartalmazza a párosítást (például egy címzetttáblában); egyébként az Exchange-cím marad.
-- Válaszfejléc nélküli levél csak akkor kerül tárgy alapján egy meglévő szálba, ha válasz/továbbítás előtagja van, van közös résztvevője, és 60 napon belül van.
+- Válaszfejléc nélküli levél csak akkor kerül tárgy alapján egy meglévő szálba, ha válasz/továbbítás előtagja van, és van közös résztvevője; időkorlát nélkül, a dátumban legközelebbi ilyen szálba.
 - A keresési index nem tárol teljes levéltörzset vagy melléklet-tartalmat exportra; az eredeti levelet változatlan forrásból kell újra megnyitni.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.

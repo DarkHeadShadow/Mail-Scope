@@ -16,7 +16,6 @@ from attachments.detect import is_suspicious_name
 from sources.models import MessageLocator, MessageMetadata
 
 
-SUBJECT_THREAD_WINDOW_SECONDS = 60 * 86400
 USER_WRITE_TIMEOUT_SECONDS = 5
 NO_SEARCH_WORD_MESSAGE = "A keresőkifejezésben nincs kereshető szó."
 BUSY_MESSAGE = "Az indexelés éppen ír az adatbázisba, próbálja újra néhány másodperc múlva."
@@ -658,8 +657,8 @@ class IndexDatabase:
         """Resolve a thread using an existing transaction connection.
 
         Without reply identifiers, only replies and forwards fall back to the
-        subject, and only into a nearby thread with a shared participant, so
-        recurring subjects such as "Számla" do not merge across years.
+        subject, into the closest-dated thread with a shared participant, so
+        a reply joins its own "Számla" and not one from another year.
         """
         if parent_ids:
             existing_messages = connection.execute(
@@ -690,10 +689,6 @@ class IndexDatabase:
                 f"""
                 SELECT thread_key FROM messages
                 WHERE normalized_subject = ?
-                  AND (
-                      ? IS NULL OR sent_timestamp IS NULL
-                      OR abs(sent_timestamp - ?) <= ?
-                  )
                   AND EXISTS (
                       SELECT 1 FROM participants
                       WHERE participants.message_id = messages.id
@@ -707,9 +702,6 @@ class IndexDatabase:
                 """,
                 (
                     normalized_subject,
-                    sent_timestamp,
-                    sent_timestamp,
-                    SUBJECT_THREAD_WINDOW_SECONDS,
                     *addresses,
                     sent_timestamp,
                     sent_timestamp,

@@ -94,7 +94,7 @@ Messages with attachments show a paperclip and the number of attachments in the 
 
 - PST/OST parsing depends on the optional native `pypff` binding and its libpff capabilities. Damaged or unsupported Outlook items are indexed as failed entries; a failing source is recorded and the remaining sources are still indexed.
 - Exchange (`/O=…/CN=…`) addresses are converted to SMTP only when the mailbox itself contains the pair (for example in a recipient table); otherwise the Exchange address is kept.
-- Messages without reply headers are joined to an existing thread by subject only if they carry a reply/forward prefix, share a participant, and are within 60 days.
+- Messages without reply headers are joined to an existing thread by subject only if they carry a reply/forward prefix, and share a participant; with no time limit, they join the closest-dated such thread.
 - Search indexes do not store complete message bodies or attachment contents for export; originals are reopened from their unchanged source.
 - A PDF is produced through the browser's print dialog, not by a bundled PDF library.
 - Search and export limits are enforced to keep local responses bounded.
