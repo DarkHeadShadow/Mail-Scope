@@ -558,6 +558,97 @@ class ServerTests(unittest.TestCase):
         self.assertIn("frame-src 'self'", headers["Content-Security-Policy"])
         self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
 
+    def test_archive_and_attached_mail_tree_over_http(self) -> None:
+        """Nested paths, password-only-in-memory, bomb stop, MSG and suspicious nested files."""
+        fixtures = Path(__file__).parent / "fixtures" / "attachments"
+        message = EmailMessage()
+        message["From"] = "Teszt Antal <antal@pelda.hu>"
+        message["To"] = "Teszt Anna <anna@pelda.hu>"
+        message["Subject"] = "Archívumok"
+        message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+        message["Message-ID"] = "<archives@example.test>"
+        message.set_content("Csatolva.")
+        for name, subtype in (
+            ("message.eml", "octet-stream"), ("password.zip", "zip"), ("bomb.zip", "zip"),
+        ):
+            message.add_attachment((fixtures / name).read_bytes(), maintype="application", subtype=subtype, filename=name)
+        self.source_path.write_bytes(
+            b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + message.as_bytes(policy=policy.SMTP)
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        message_id = int(
+            self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=True,
+                deleted_only=False, item_type=None, include_duplicates=False, limit=5, offset=0,
+            )[0]["message_id"]
+        )
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        port = int(http_server.server_address[1])
+
+        def request(method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=60)
+            headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+            connection.request(method, path, body=None if payload is None else json.dumps(payload), headers=headers)
+            response = connection.getresponse()
+            body = json.loads(response.read())
+            connection.close()
+            return response.status, body
+
+        _, listing = request("GET", f"/api/messages/{message_id}/attachments")
+        self.assertEqual([item["container"] for item in listing["attachments"]], ["email", "archive", "archive"])
+        _, mail = request("GET", f"/api/attachments/{message_id}/0/preview")
+        self.assertEqual((mail["kind"], mail["attachments"]), ("email", ["szamlak.zip", "szerzodes.msg"]))
+        self.assertTrue(mail["formatted"])
+        # 0/0 is the ZIP inside the attached e-mail; 0/0/3 the disguised program in it.
+        _, children = request("GET", f"/api/attachments/{message_id}/0/0/children")
+        self.assertEqual(children["entries"][3]["path"], "0/0/3")
+        _, exe = request("GET", f"/api/attachments/{message_id}/0/0/3/info")
+        self.assertTrue(exe["executable"])
+        self.assertIn("szamlak.zip › fizetes_reszletek.pdf.exe", exe["location"])
+        _, zip_info = request("GET", f"/api/attachments/{message_id}/0/0/info")
+        self.assertEqual(zip_info["metadata"]["Bejegyzések"], "4")
+        self.assertTrue(any("fizetes_reszletek.pdf.exe" in s for s in zip_info["document_signals"]))
+        _, pdf = request("GET", f"/api/attachments/{message_id}/0/0/0/preview")
+        self.assertEqual((pdf["kind"], pdf["pages"]), ("pdf", 2))
+        _, msg = request("GET", f"/api/attachments/{message_id}/0/1/preview")
+        self.assertEqual(dict(msg["headers"])["Subject"], "Szerződéstervezet – Outlook-levélként")
+        _, inner_pdf = request("GET", f"/api/attachments/{message_id}/0/1/0/info")
+        self.assertEqual(inner_pdf["real_kind"], "pdf")
+        rows = self.application.archive(
+            query="", source_id=None, folder_id=None, has_attachments=True,
+            deleted_only=False, item_type=None, include_duplicates=False, limit=5, offset=0,
+        )
+        self.assertIn("fizetes_reszletek.pdf.exe", rows[0]["suspicious_attachments"])
+
+        _, locked = request("GET", f"/api/attachments/{message_id}/1/preview")
+        self.assertEqual((locked["kind"], locked["needs_password"]), ("archive", True))
+        self.assertEqual(request("GET", f"/api/attachments/{message_id}/1/0/preview")[1]["kind"], "none")
+        _, wrong = request("POST", f"/api/attachments/{message_id}/1/password", {"password": "rossz"})
+        self.assertTrue(wrong["password_error"])
+        _, opened = request("POST", f"/api/attachments/{message_id}/1/password", {"password": "pelda123"})
+        self.assertFalse(opened["password_error"])
+        _, secret = request("GET", f"/api/attachments/{message_id}/1/0/preview")
+        self.assertIn("439 750 Ft", secret["text"])
+        log_text = "".join(path.read_text(encoding="utf-8") for path in (self.case_directory / ".mailscope").glob("*.log"))
+        self.assertNotIn("pelda123", log_text)
+        self.assertFalse(any("pelda123".encode() in path.read_bytes() for path in (self.case_directory / ".mailscope").rglob("*") if path.is_file()))
+
+        _, bomb = request("GET", f"/api/attachments/{message_id}/2/preview")
+        self.assertIn("Lehetséges ZIP-bomba", bomb["stopped"])
+        status, error = request("GET", f"/api/attachments/{message_id}/2/0/text")
+        self.assertEqual(status, 404)
+        status, _ = request("POST", f"/api/attachments/{message_id}/2/0/save", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(request("GET", f"/api/attachments/{message_id}/9/0/info")[0], 404)
+        self.assertFalse(any((self.case_directory / ".mailscope" / "tmp").glob("*")))
+        self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
+
     def test_full_reverification_http_route(self) -> None:
         """Start a full check through the same-origin POST route."""
         source_id = self._index_fixture_source()

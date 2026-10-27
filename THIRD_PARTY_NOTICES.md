@@ -36,3 +36,28 @@ These run only inside the isolated attachment worker process:
 The `xlwt` package (BSD) is used only by the development script that generates
 the fictional `.xls` test fixture; it is not shipped or required at run time.
 
+## Archive and Outlook MSG attachments
+
+These also run only inside the isolated attachment worker process:
+
+| Package | Version | License | Use |
+| --- | --- | --- | --- |
+| `py7zr` | 1.1.4 | LGPL-2.1-or-later | 7z archive listing and unpacking in memory |
+| `pyppmd` | 1.3.1 | LGPL-2.1-or-later | dependency of py7zr (PPMd) |
+| `pybcj` | 1.0.8 | LGPL-2.1-or-later | dependency of py7zr (BCJ filters) |
+| `inflate64` | 1.0.4 | LGPL-2.1-or-later | dependency of py7zr (Deflate64) |
+| `multivolumefile` | 0.2.3 | LGPL-2.1-or-later | dependency of py7zr |
+| `pycryptodomex` | 3.24.1 | BSD-2-Clause / Public Domain | dependency of py7zr (AES) |
+| `backports.zstd` | 1.8.0 | PSF-2.0 | dependency of py7zr (Zstandard) |
+| `brotli` | 1.2.1 | MIT | dependency of py7zr |
+| `texttable` | 1.7.2 | MIT | dependency of py7zr |
+| `psutil` | 7.2.2 | BSD-3-Clause | dependency of py7zr |
+| `olefile` | 0.47 | BSD-2-Clause | reading Outlook MSG (OLE) files; the MAPI reader is Mail-Scope's own |
+
+The LGPL packages are used unmodified, as separate packages, like libpff; see
+[the py7zr notice](./LICENSES/NOTICE_py7zr.txt). `extract-msg` is not used
+because its GPL-3.0 license is not compatible with Mail-Scope's MIT License.
+
+RAR archives (and ZIP files with AES encryption) are unpacked only when the
+user has installed 7-Zip; Mail-Scope calls the installed `7z.exe` without a
+window and does not ship it.

@@ -148,8 +148,10 @@ Forrás lehet:
       képletek/értékek, megjegyzések, makró és külső hivatkozás jelzése), XLS (`xlrd`),
       tisztított HTML homokozott nézettel; a fő CSP egyetlen bővítése `frame-src 'self'`.
       Kitalált mintafájlok: `tests/fixtures/attachments/` (generálószkripttel).
-   3. [ ] Archívumok (ZIP, 7z, RAR) és csatolt levelek (EML, MSG) beágyazott fával,
-      ZIP-bomba-védelem, jelszó.
+   3. [x] Archívumok (ZIP, 7z, gzip; RAR telepített 7-Zippel) és csatolt levelek (EML, MSG
+      saját, `olefile`-alapú MAPI-olvasóval) beágyazott fával (`#/melleklet/<levél>/2/0/3`),
+      kibontás a memóriában, ZIP-bomba-védelem (5 szint, 10 000 bejegyzés, 2 GB, 100:1),
+      munkamenetig élő jelszó, a beágyazott gyanús fájl a levél jelzésében is.
    4. [ ] LibreOffice „Pontos nézet”.
    5. [ ] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható.
 

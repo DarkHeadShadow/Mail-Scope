@@ -11,6 +11,7 @@ from typing import Any
 from sources.models import Attachment
 
 from . import render as _render  # noqa: F401 – loaded by name in the worker; keeps it in the build
+from .containers import seven_zip_path
 from .detect import detect
 from .sandbox import run_isolated
 
@@ -19,8 +20,12 @@ PREVIEW_LIMIT_BYTES = 200 * 1024 * 1024
 _SAFE_CACHE_NAME = re.compile(r"^[a-z0-9_.-]+$")
 
 
-def describe(attachments: list[Attachment]) -> list[dict[str, Any]]:
-    """Return the analyst view of each attachment: real type, hash and warnings."""
+def describe(attachments: list[Attachment], parent: str = "", parent_trail: str = "") -> list[dict[str, Any]]:
+    """Return the analyst view of each attachment: real type, hash and warnings.
+
+    Nested attachments (inside an archive or an attached e-mail) get a path
+    such as ``0/2`` and a trail that names every level for the data sheet.
+    """
     entries: list[dict[str, Any]] = []
     for index, attachment in enumerate(attachments):
         info = detect(attachment.data, attachment.filename, attachment.content_type)
@@ -32,7 +37,9 @@ def describe(attachments: list[Attachment]) -> list[dict[str, Any]]:
             view = "none"
         entries.append(
             {
-                "path": str(index),
+                "path": f"{parent}/{index}" if parent else str(index),
+                "trail": f"{parent_trail} › {attachment.filename}" if parent else f"{index + 1}. melléklet",
+                "container": view if view in {"archive", "email"} else None,
                 "name": attachment.filename,
                 "size": len(attachment.data),
                 "declared_type": attachment.content_type,
@@ -46,6 +53,49 @@ def describe(attachments: list[Attachment]) -> list[dict[str, Any]]:
             }
         )
     return entries
+
+
+def expand(entry: dict[str, Any], data: bytes, password: str | None, work_dir: Path | None) -> dict[str, Any]:
+    """Unpack an archive or an attached e-mail in the isolated worker.
+
+    Returns the container facts plus ``entries`` (described like top-level
+    attachments, with nested paths) and ``data`` (their bytes, or None when a
+    file was not unpacked: encrypted, over a limit, or the archive stopped).
+    """
+    if entry["view"] == "email":
+        result = run_isolated("attachments.containers:expand_email", data, entry["real_kind"])
+    elif entry["view"] == "archive":
+        seven_zip = seven_zip_path() if entry["real_kind"] in {"rar", "zip"} else None
+        result = run_isolated(
+            "attachments.containers:expand_archive", data, entry["real_kind"], entry["name"],
+            password, seven_zip, str(work_dir) if work_dir else None,
+        )
+    else:
+        raise ValueError("Ez a melléklet nem archívum és nem csatolt levél.")
+    raw = result.pop("entries")
+    children = [
+        Attachment(item["name"], item.get("content_type") or "", item["data"] or b"", error=None)
+        for item in raw
+    ]
+    described = describe(children, entry["path"], entry["trail"])
+    for child, item in zip(described, raw):
+        if item["inner_path"] != item["name"]:
+            child["trail"] = f"{entry['trail']} › {item['inner_path']}"
+        child["inner_path"] = item["inner_path"]
+        child["encrypted"] = item["encrypted"]
+        child["compressed"] = item["compressed"]
+        child["modified"] = item["modified"]
+        child["unpacked"] = item["data"] is not None
+        if item["data"] is None:
+            # Not unpacked: the directory size is known, the content is not.
+            child.update(size=item["size"], sha256="", view="none", container=None,
+                         real_kind="unknown", real_label="ismeretlen (nincs kibontva)", warnings=[])
+            child["reason"] = item["error"] or "A fájl nincs kibontva."
+        elif item["error"]:
+            child["warnings"].insert(0, item["error"])
+    result["entries"] = described
+    result["data"] = [item["data"] for item in raw]
+    return result
 
 
 class PreviewCache:
@@ -116,6 +166,16 @@ def preview(
             document_html(cache, entry, data)
             result["formatted"] = True
         return result
+    if view == "email":
+        def produce_email() -> dict[str, Any]:
+            rendered = run_isolated("attachments.containers:render_email", data, entry["real_kind"], entry["name"])
+            document = rendered.pop("document")
+            if document:
+                cache.write(sha256, "document.html", document.encode("utf-8"))
+            rendered["formatted"] = bool(document)
+            return rendered
+
+        return _cached_json(cache, sha256, "email.json", produce_email)
     if view == "table":
         return _cached_json(
             cache, sha256, f"table-{page}.json",
@@ -150,11 +210,11 @@ def analysis(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> dict[st
 
 def document_html(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> bytes:
     """Return the sanitized HTML document shown in the sandboxed iframe."""
-    if entry["view"] not in {"docx", "html"}:
+    if entry["view"] not in {"docx", "html", "email"}:
         raise ValueError("Ehhez a melléklethez nincs formázott nézet.")
     cached = cache.read(entry["sha256"], "document.html")
     if cached is None:
-        if entry["view"] == "docx":
+        if entry["view"] in {"docx", "email"}:
             preview(cache, entry, data)
         else:
             rendered = run_isolated("attachments.render:render_html_document", data, entry["name"])
@@ -169,7 +229,7 @@ def extracted_text(cache: PreviewCache, entry: dict[str, Any], data: bytes) -> d
     if view == "pdf":
         result = analysis(cache, entry, data)
         return {"pages": result.get("pages_text", []), "text_layer": result.get("text_layer", False)}
-    if view in {"docx", "text", "html"}:
+    if view in {"docx", "text", "html", "email"}:
         result = preview(cache, entry, data)
         return {"text": result.get("text", "")}
     raise ValueError("Ehhez a melléklethez nincs kinyerhető szöveg.")
@@ -193,11 +253,11 @@ def _no_preview_reason(entry: dict[str, Any]) -> str:
         return "A melléklet nagyobb 200 MB-nál; csak az adatlap és a mentés érhető el."
     if entry.get("executable"):
         return "Futtatható fájl: biztonsági okból nincs előnézet, csak adatlap és mentés."
+    if entry.get("reason"):
+        return entry["reason"]
     if entry["warnings"] and entry["warnings"][0].startswith("A melléklet nem olvasható"):
         return entry["warnings"][0]
     name = entry["name"].casefold()
-    if entry["real_kind"] in {"ole", "rtf", "pptx", "odf"} and not name.endswith((".msg", ".xls", ".xlt")):
+    if entry["real_kind"] in {"ole", "rtf", "pptx", "odf"} and not name.endswith((".xls", ".xlt")):
         return "Ehhez a formátumhoz LibreOffice kell („Pontos nézet”); az adatlap és a mentés elérhető."
-    if entry["real_kind"] in {"zip", "7z", "rar", "gzip"} or name.endswith(".msg"):
-        return "Az archívumok és a csatolt Outlook-levelek kibontása a következő szakaszban készül el; az adatlap és a mentés elérhető."
     return f"Ehhez a típushoz ({entry['real_label']}) még nincs beépített előnézet; az adatlap és a mentés elérhető."

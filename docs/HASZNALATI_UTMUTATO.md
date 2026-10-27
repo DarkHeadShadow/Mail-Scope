@@ -381,14 +381,17 @@ nyers fájl nem kerül a böngészőbe.
 - a **Részletes keresés** találatainál a **Mellékletek** gombbal.
 
 A nézegetőnek saját címe van (`#/melleklet/<levél>/<melléklet>`), így a Vissza gomb és a frissítés
-is működik.
+is működik. Archívumban vagy csatolt levélben lévő fájlnál a cím a teljes utat tartalmazza, pl.
+`#/melleklet/8/1/2/0` = a levél 2. melléklete (egy ZIP) › abban a 3. fájl (egy belső ZIP) › abban
+az 1. fájl.
 
 ### Felépítés
 
 - **Fejléc:** vissza a levélhez, a levél tárgya, feladója, címzettje és dátuma, a melléklet
   sorszáma („3 / 7”), keresés a dokumentumban, nagyítás, **Mentés…**.
-- **Bal oldalt:** a levél mellékletei; a gyanús mellékletek sárga jelzést kapnak.
-  Alul **Összes mentése (ZIP + jegyzék)**.
+- **Bal oldalt:** a levél mellékletfája; a gyanús mellékletek sárga jelzést kapnak. Az
+  archívumok és a csatolt levelek a ▸ jellel kibonthatók, a bennük lévő fájlok beljebb húzva
+  látszanak, és ugyanúgy megnyithatók. Alul **Összes mentése (ZIP + jegyzék)**.
 - **Középen:** az előnézet.
 - **Jobb oldalt:** az elemzői adatlap.
 
@@ -405,22 +408,51 @@ is működik.
 | Excel (XLSX, XLSM) | munkalapfülek (a rejtett és nagyon rejtett lapok is, jelölve), képletsor a kijelölt cellához, **Képletek** kapcsoló, a rejtett sorok és oszlopok halványan, csíkozva, a megjegyzéses cellák sarokjellel |
 | Régi Excel (XLS) | munkalapok értékekkel (képletek nélkül) |
 | HTML | **Formázott** fül tisztítva, homokozott keretben; **Szöveg** és **Forrás** fül |
+| ZIP, 7z, RAR, gzip | tartalomjegyzék (fájl, méret, tömörített méret, valódi típus, módosítás, állapot); a fájlok a táblázatból vagy a fából nyithatók meg, kicsomagolás nélkül, a memóriában |
+| Csatolt levél (EML, MSG) | fejlécek (feladó, címzett, dátum, tárgy, Message-ID), törzs (**Formázott** fül tisztítva, homokozott keretben, ha van HTML-törzs; **Szöveg** fül), a levél saját mellékletei |
 | Futtatható fájl (EXE, DLL, MSI, BAT, PS1, JS, VBS, LNK…) | előnézet nincs, csak adatlap és mentés |
 
 A formázott (Word, HTML) nézet egy elkülönített, homokozott keretben jelenik meg: szkript, űrlap,
 navigáció és külső tartalom nem működik benne, a linkek célja eltávolítva. Kereséskor a program
 az előnézetet a **Szöveg** fülre váltja.
 
-A tömörített fájlok és a csatolt levelek kibontása, a régi DOC/PPT/RTF megjelenítése és a
-LibreOffice-os „Pontos nézet” a következő szakaszokban készül el. Addig ezeknél az adatlap és a
-mentés érhető el.
+A régi DOC/PPT/RTF megjelenítése és a LibreOffice-os „Pontos nézet” a következő szakaszban
+készül el. Addig ezeknél az adatlap és a mentés érhető el.
+
+#### Archívumok és csatolt levelek
+
+- **Kibontás a memóriában:** a program az archívumot a forrásból olvassa, és a benne lévő
+  fájlokat csak a memóriában bontja ki; lemezre nem ír semmit (a RAR kivételével, lásd lent).
+- **Korlátok (ZIP-bomba elleni védelem):** legfeljebb 5 szint mélyen (archívum az
+  archívumban), legfeljebb 10 000 bejegyzés, legfeljebb 2 GB kibontott méret és 100:1-es
+  tömörítési arány (10 MB felett). Ha egy archívum ezt túllépné, a program **„Lehetséges
+  ZIP-bomba”** figyelmeztetéssel leállítja a kibontást; a tartalomjegyzék első 500 sora
+  ekkor is látszik. Egy fájl legfeljebb 200 MB-ig, egy archívum összesen 512 MB-ig töltődik be
+  a memóriába; a többi fájl csak a listában szerepel.
+- **Jelszavas archívum:** a ZIP tartalomjegyzéke jelszó nélkül is látszik (a 7z-é csak akkor,
+  ha a fájllista nem titkosított). Az archívum nézetében megadhatja az ismert jelszót
+  (**Kibontás jelszóval**). A jelszót a program **nem menti és nem naplózza**: csak a
+  program bezárásáig, illetve másik ügy megnyitásáig él a memóriában. Hibás jelszónál
+  „A jelszó hibás” üzenet jelenik meg.
+- **RAR:** csak akkor bontható ki, ha a gépen telepítve van a 7-Zip (`7z.exe`). Ilyenkor a
+  program a RAR-fájlt az ügy `.mailscope\tmp\` mappájába írja, a 7-Zippel ablak nélkül
+  kibontja, majd azonnal törli. 7-Zip nélkül csak az adatlap és a mentés érhető el. Az
+  AES-titkosítású ZIP-hez is 7-Zip kell.
+- **Outlook MSG:** a program saját olvasóval, a fájl MAPI-tulajdonságaiból állítja össze a
+  levelet (fejlécek, szöveges és HTML-törzs, mellékletek, beágyazott Outlook-elemek). Ha az
+  MSG-ben benne vannak az eredeti internetes fejlécek, azok az irányadók.
+- **Gyanús fájl az archívumban:** ha egy archívumban futtatható vagy álcázott fájl van, az a fában
+  sárga jelzést kap, az archívum adatlapja megnevezi, és a levél gemkapcsa is sárga lesz.
 
 Legfeljebb 200 MB-os mellékletnél van előnézet; a szövegnézet az első 5 MB-ot mutatja.
 
 ### Elemzői adatlap
 
 - **Fájl:** név, méret, megadott típus, a **tartalom alapján felismert valódi típus** (egyezik /
-  ELTÉR), SHA-256, hely a forrásban (forrásfájl › mappa › levél › melléklet).
+  ELTÉR), SHA-256, hely a forrásban (forrásfájl › mappa › levél › melléklet › archívumon belüli
+  út), archívumban lévő fájlnál az útvonal és a módosítás ideje.
+- **Archívum:** formátum, bejegyzések száma, kibontott méret, tömörítési arány, titkosított
+  fájlok száma; csatolt levélnél a formátum (EML/MSG) és a mellékletek száma.
 - **Dokumentum-metaadatok:** szerző, utolsó mentő, cím, létrehozás és módosítás ideje, készítő
   program, oldalak / munkalapok, képletek és megjegyzések száma.
 - **Biztonság (PDF):** beágyazott JavaScript, beágyazott fájl, űrlapmezők, digitális aláírás
@@ -458,7 +490,7 @@ a program azonnal jelzi; a tartalom szerinti álcázást a melléklet első megn
 | Billentyű | Hatás |
 | --- | --- |
 | `Esc` | vissza oda, ahonnan a nézegetőt megnyitotta |
-| `←` / `→` | előző / következő melléklet |
+| `←` / `→` | előző / következő melléklet (archívumon belül az ugyanazon a szinten lévő fájlok között) |
 | `Ctrl+F` | keresés a dokumentumban |
 | `+` / `−` | nagyítás / kicsinyítés |
 

@@ -4,10 +4,13 @@ import io
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from attachments import render
+from attachments import containers, render
 from attachments.detect import detect, is_suspicious_name
 from attachments.sandbox import AttachmentProcessingError, run_isolated
+from attachments.service import describe, expand
+from sources.models import Attachment
 
 
 def _png() -> bytes:
@@ -141,6 +144,104 @@ class DocumentRendererTests(unittest.TestCase):
     def test_pdf_renders_in_the_isolated_worker(self) -> None:
         page = run_isolated("attachments.render:render_pdf", self.fixture("sample.pdf"), 0)
         self.assertEqual(page["pages"], 2)
+
+
+class ContainerTests(unittest.TestCase):
+    """Archives and attached e-mails, unpacked in memory within the limits."""
+
+    def fixture(self, name: str) -> bytes:
+        return (FIXTURES / name).read_bytes()
+
+    def test_containers_are_recognized(self) -> None:
+        for name, kind, view in (
+            ("archive.zip", "zip", "archive"), ("archive.7z", "7z", "archive"),
+            ("message.eml", "email", "email"), ("message.msg", "msg", "email"),
+        ):
+            info = detect(self.fixture(name), name)
+            self.assertEqual((info.kind, info.view, info.warnings), (kind, view, ()), name)
+        # An OLE file is only an Outlook item when it carries MAPI property streams.
+        self.assertEqual(detect(self.fixture("sample.xls"), "a.msg").kind, "ole")
+
+    def test_zip_lists_and_unpacks_nested_files(self) -> None:
+        result = containers.expand_archive(self.fixture("archive.zip"), "zip", "archive.zip")
+        self.assertIsNone(result["stopped"])
+        names = [entry["inner_path"] for entry in result["entries"]]
+        self.assertEqual(names, ["szamlak/szamla-2023-05.pdf", "szamlak/Kotberszamitas.xlsx",
+                                 "belso/jegyzokonyv.zip", "fizetes_reszletek.pdf.exe"])
+        self.assertEqual(result["entries"][0]["data"], self.fixture("sample.pdf"))
+        disguised = detect(result["entries"][3]["data"], result["entries"][3]["name"])
+        self.assertTrue(disguised.executable)
+        self.assertTrue(any("Kettős kiterjesztés" in warning for warning in disguised.warnings))
+        inner = containers.expand_archive(result["entries"][2]["data"], "zip", "jegyzokonyv.zip")
+        self.assertIn("Átvette: Teszt Béla", inner["entries"][0]["data"].decode("utf-8"))
+
+    def test_zip_bomb_is_stopped_before_unpacking(self) -> None:
+        result = containers.expand_archive(self.fixture("bomb.zip"), "zip", "bomb.zip")
+        self.assertIn("Lehetséges ZIP-bomba", result["stopped"])
+        self.assertIsNone(result["entries"][0]["data"])
+        with mock.patch.object(containers, "MAX_ENTRIES", 2):
+            crowded = containers.expand_archive(self.fixture("archive.zip"), "zip", "archive.zip")
+        self.assertIn("bejegyzést tartalmaz", crowded["stopped"])
+
+    def test_password_archives(self) -> None:
+        for name, kind in (("password.zip", "zip"), ("password.7z", "7z")):
+            locked = containers.expand_archive(self.fixture(name), kind, name)
+            self.assertTrue(locked["needs_password"], name)
+            self.assertTrue(all(entry["data"] is None for entry in locked["entries"]), name)
+            wrong = containers.expand_archive(self.fixture(name), kind, name, "rossz")
+            self.assertTrue(wrong["password_error"], name)
+            opened = containers.expand_archive(self.fixture(name), kind, name, "pelda123")
+            self.assertFalse(opened["password_error"], name)
+            self.assertTrue(all(entry["data"] for entry in opened["entries"]), name)
+        plain = containers.expand_archive(self.fixture("archive.7z"), "7z", "archive.7z")
+        self.assertEqual([entry["name"] for entry in plain["entries"]], ["szamla-2023-05.pdf", "feljegyzes.txt"])
+
+    def test_rar_needs_seven_zip_and_listing_is_parsed(self) -> None:
+        result = containers.expand_archive(b"Rar!\x1a\x07\x01\x00", "rar", "a.rar", seven_zip=None)
+        self.assertIn("7-Zip", result["stopped"])
+        listing = (
+            "Path = a.rar\nType = Rar5\n\n----------\n"
+            "Path = mappa\nFolder = +\nSize = 0\n\n"
+            "Path = mappa\\szamla.pdf\nFolder = -\nSize = 1310\nPacked Size = 900\n"
+            "Modified = 2023-05-10 16:58:00\nEncrypted = +\n\n"
+        )
+        entries = containers.parse_seven_zip_listing(listing)
+        self.assertEqual(
+            [(entry["inner_path"], entry["size"], entry["compressed"], entry["encrypted"], entry["modified"]) for entry in entries],
+            [("mappa/szamla.pdf", 1310, 900, True, "2023-05-10 16:58")],
+        )
+
+    def test_msg_reads_headers_body_and_attachments(self) -> None:
+        preview = containers.render_email(self.fixture("message.msg"), "msg", "message.msg")
+        headers = dict(preview["headers"])
+        self.assertEqual(headers["From"], "Teszt Anna <teszt.anna@pelda.hu>")
+        self.assertEqual(headers["To"], "Teszt Béla <teszt.bela@pelda.hu>")
+        self.assertEqual(headers["Subject"], "Szerződéstervezet – Outlook-levélként")
+        self.assertIn("Csatolom a szerződéstervezetet", preview["text"])
+        self.assertTrue(preview["converted"])
+        children = containers.expand_email(self.fixture("message.msg"), "msg")["entries"]
+        self.assertEqual(children[0]["data"], self.fixture("sample.pdf"))
+        attached = children[1]
+        self.assertEqual(attached["name"], "Egyeztetés a helyszíni bejárásról.eml")
+        inner = containers.render_email(attached["data"], "email", attached["name"])
+        self.assertEqual(dict(inner["headers"])["From"], "Teszt Béla <teszt.bela@pelda.hu>")
+        self.assertIn("A bejárás jövő kedden", inner["text"])
+
+    def test_eml_lists_only_its_own_attachments_and_sanitizes_html(self) -> None:
+        preview = containers.render_email(self.fixture("message.eml"), "email", "message.eml")
+        self.assertEqual(preview["attachments"], ["szamlak.zip", "szerzodes.msg"])
+        self.assertNotIn("<script", preview["document"])
+        self.assertIn("<b>számlákat</b>", preview["document"])
+        children = containers.expand_email(self.fixture("message.eml"), "email")["entries"]
+        self.assertEqual(detect(children[1]["data"], children[1]["name"]).kind, "msg")
+
+    def test_expansion_runs_in_the_isolated_worker(self) -> None:
+        entry = describe([Attachment("archive.zip", "application/zip", self.fixture("archive.zip"))])[0]
+        result = expand(entry, self.fixture("archive.zip"), None, None)
+        self.assertEqual([child["path"] for child in result["entries"]], ["0/0", "0/1", "0/2", "0/3"])
+        self.assertEqual(result["entries"][2]["container"], "archive")
+        self.assertEqual(result["entries"][0]["trail"], "1. melléklet › szamlak/szamla-2023-05.pdf")
+        self.assertTrue(result["entries"][3]["executable"])
 
 
 if __name__ == "__main__":

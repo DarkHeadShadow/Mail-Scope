@@ -199,6 +199,266 @@ def _xls() -> bytes | None:
     return output.getvalue()
 
 
+def _zipcrypto(entries: dict[str, bytes], password: bytes) -> bytes:
+    """Build a ZIP with traditional PKWARE (ZipCrypto) encryption, stored entries."""
+    import binascii
+    import struct
+
+    def crc_byte(crc: int, byte: int) -> int:
+        return binascii.crc32(bytes([byte]), crc ^ 0xFFFFFFFF) ^ 0xFFFFFFFF
+
+    def keys_for(secret: bytes) -> list[int]:
+        keys = [0x12345678, 0x23456789, 0x34567890]
+        for byte in secret:
+            update(keys, byte)
+        return keys
+
+    def update(keys: list[int], byte: int) -> None:
+        keys[0] = crc_byte(keys[0], byte)
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        keys[2] = crc_byte(keys[2], keys[1] >> 24)
+
+    def encrypt(keys: list[int], data: bytes) -> bytes:
+        output = bytearray()
+        for byte in data:
+            temp = (keys[2] | 2) & 0xFFFF
+            output.append(byte ^ (((temp * (temp ^ 1)) >> 8) & 0xFF))
+            update(keys, byte)
+        return bytes(output)
+
+    local = io.BytesIO()
+    central = io.BytesIO()
+    for index, (name, data) in enumerate(entries.items()):
+        crc = binascii.crc32(data)
+        keys = keys_for(password)
+        header = bytes((17 + index * 7 + i) & 0xFF for i in range(11)) + bytes([crc >> 24])
+        payload = encrypt(keys, header + data)
+        encoded = name.encode("utf-8")
+        offset = local.tell()
+        fields = (20, 0x0801, 0, 0x6000, 0x5A21, crc, len(payload), len(data), len(encoded), 0)
+        local.write(struct.pack("<IHHHHHIIIHH", 0x04034B50, *fields) + encoded + payload)
+        central.write(struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, *fields, 0, 0, 0, 0, offset) + encoded)
+    directory = central.getvalue()
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(directory), local.tell(), 0)
+    return local.getvalue() + directory + end
+
+
+def _cfb(tree: dict) -> bytes:
+    """Write a minimal OLE compound file (version 3) from nested {name: bytes | dict}.
+
+    Streams under 4096 bytes go into the mini stream, as the format requires.
+    Only used to build the fictional MSG fixture.
+    """
+    import struct
+
+    sector = 512
+    free, end_chain, fat_mark, no_stream = 0xFFFFFFFF, 0xFFFFFFFE, 0xFFFFFFFD, 0xFFFFFFFF
+    nodes: list[dict] = [{"name": "Root Entry", "type": 5, "children": []}]
+
+    def add(parent: int, children: dict) -> None:
+        for name, value in children.items():
+            node = {"name": name, "type": 1 if isinstance(value, dict) else 2, "children": [], "data": value}
+            nodes.append(node)
+            nodes[parent]["children"].append(len(nodes) - 1)
+            if isinstance(value, dict):
+                add(len(nodes) - 1, value)
+
+    add(0, tree)
+    mini = bytearray()
+    minifat: list[int] = []
+    big: list[tuple[int, bytes]] = []
+    for index, node in enumerate(nodes):
+        if node["type"] != 2:
+            continue
+        data = node["data"]
+        node["size"] = len(data)
+        if len(data) < 4096:
+            count = max(1, -(-len(data) // 64)) if data else 0
+            node["start"] = len(mini) // 64 if data else end_chain
+            for i in range(count):
+                minifat.append(len(minifat) + 1 if i < count - 1 else end_chain)
+            mini += data + b"\x00" * (count * 64 - len(data))
+        else:
+            big.append((index, data))
+
+    def sectors(length: int) -> int:
+        return -(-length // sector)
+
+    directory_sectors = sectors(len(nodes) * 128)
+    minifat_sectors = sectors(len(minifat) * 4)
+    mini_sectors = sectors(len(mini))
+    big_sectors = sum(sectors(len(data)) for _, data in big)
+    fat_sectors = 1
+    while True:
+        total = fat_sectors + minifat_sectors + directory_sectors + mini_sectors + big_sectors
+        if sectors(total * 4) <= fat_sectors:
+            break
+        fat_sectors += 1
+    fat = [free] * (fat_sectors * sector // 4)
+    position = 0
+
+    def chain(count: int) -> int:
+        nonlocal position
+        if count == 0:
+            return end_chain
+        start = position
+        for i in range(count):
+            fat[position] = position + 1 if i < count - 1 else end_chain
+            position += 1
+        return start
+
+    for i in range(fat_sectors):
+        fat[position] = fat_mark
+        position += 1
+    minifat_start = chain(minifat_sectors)
+    directory_start = chain(directory_sectors)
+    mini_start = chain(mini_sectors)
+    for index, data in big:
+        nodes[index]["start"] = chain(sectors(len(data)))
+    nodes[0]["start"], nodes[0]["size"] = mini_start, len(mini)
+
+    for node in nodes:
+        # Siblings as a simple right-leaning chain; all nodes black.
+        kids = node["children"]
+        node["child"] = kids[0] if kids else no_stream
+        for left, right in zip(kids, kids[1:] + [None]):
+            nodes[left]["right"] = right if right is not None else no_stream
+    entries = bytearray()
+    for node in nodes:
+        name = node["name"].encode("utf-16-le") + b"\x00\x00"
+        entries += struct.pack(
+            "<64sHBBIII16sIQQIII", name, len(name), node["type"], 1, no_stream,
+            node.get("right", no_stream), node.get("child", no_stream) if node["type"] != 2 else no_stream,
+            b"\x00" * 16, 0, 0, 0, node.get("start", end_chain) if node["type"] != 1 else 0,
+            node.get("size", 0), 0,
+        )
+    entries += b"\x00" * (directory_sectors * sector - len(entries))
+    difat = list(range(fat_sectors)) + [free] * (109 - fat_sectors)
+    header = struct.pack(
+        "<8s16sHHHHH6sIIIIIIIII", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"\x00" * 16, 0x3E, 3, 0xFFFE, 9, 6,
+        b"\x00" * 6, 0, fat_sectors, directory_start, 0, 4096, minifat_start if minifat_sectors else end_chain,
+        minifat_sectors, end_chain, 0,
+    ) + struct.pack("<109I", *difat)
+    body = bytearray()
+    body += struct.pack(f"<{len(fat)}I", *fat)
+    body += struct.pack(f"<{len(minifat)}I", *minifat) + b"\xff" * (minifat_sectors * sector - len(minifat) * 4)
+    body += entries
+    body += mini + b"\x00" * (mini_sectors * sector - len(mini))
+    for _, data in big:
+        body += data + b"\x00" * (sectors(len(data)) * sector - len(data))
+    return header + bytes(body)
+
+
+def _msg(attachment_pdf: bytes) -> bytes:
+    """Build a fictional Outlook MSG with an attached PDF and an attached Outlook item."""
+    import struct
+
+    def text(prop: int, value: str) -> tuple[str, bytes]:
+        return f"__substg1.0_{prop:04X}001F", value.encode("utf-16-le")
+
+    def properties(header: int, values: list[tuple[int, int, bytes]]) -> bytes:
+        body = b"".join(struct.pack("<HHI", kind, prop, 6) + value.ljust(8, b"\x00") for prop, kind, value in values)
+        return b"\x00" * header + body
+
+    filetime = struct.pack("<Q", (1683727080 + 11644473600) * 10_000_000)  # 2023-05-10 13:58 UTC
+    inner = dict([
+        text(0x0037, "Egyeztetés a helyszíni bejárásról"),
+        text(0x0C1A, "Teszt Béla"),
+        text(0x5D01, "teszt.bela@pelda.hu"),
+        text(0x0E04, "Teszt Anna"),
+        text(0x1000, "Kedves Anna!\r\nA bejárás jövő kedden 10 órakor lesz.\r\nÜdvözlettel: Béla"),
+        ("__properties_version1.0", properties(24, [(0x0E06, 0x0040, filetime)])),
+    ])
+    tree = dict([
+        text(0x0037, "Szerződéstervezet – Outlook-levélként"),
+        text(0x0C1A, "Teszt Anna"),
+        text(0x5D01, "teszt.anna@pelda.hu"),
+        text(0x1000, "Kedves Béla!\r\nCsatolom a szerződéstervezetet és az előző egyeztetést.\r\nÜdv: Anna"),
+        text(0x1035, "<kitalalt-msg-1@pelda.hu>"),
+        ("__properties_version1.0", properties(32, [(0x0E06, 0x0040, filetime), (0x0039, 0x0040, filetime)])),
+        ("__recip_version1.0_#00000000", dict([
+            text(0x3001, "Teszt Béla"),
+            text(0x39FE, "teszt.bela@pelda.hu"),
+            ("__properties_version1.0", properties(8, [(0x0C15, 0x0003, struct.pack("<i", 1))])),
+        ])),
+        ("__attach_version1.0_#00000000", dict([
+            text(0x3707, "szerzodes-tervezet.pdf"),
+            text(0x370E, "application/pdf"),
+            ("__substg1.0_37010102", attachment_pdf),
+            ("__properties_version1.0", properties(8, [(0x3705, 0x0003, struct.pack("<i", 1))])),
+        ])),
+        ("__attach_version1.0_#00000001", dict([
+            text(0x3001, "Egyeztetés a helyszíni bejárásról"),
+            ("__substg1.0_3701000D", inner),
+            ("__properties_version1.0", properties(8, [(0x3705, 0x0003, struct.pack("<i", 5))])),
+        ])),
+    ])
+    return _cfb(tree)
+
+
+def _eml(attachments: list[tuple[str, str, bytes]]) -> bytes:
+    """Build a fictional EML with plain and HTML bodies and the given attachments."""
+    from email.message import EmailMessage
+
+    message = EmailMessage()
+    message["From"] = "Teszt Anna <teszt.anna@pelda.hu>"
+    message["To"] = "Teszt Béla <teszt.bela@pelda.hu>"
+    message["Date"] = "Wed, 10 May 2023 16:58:00 +0200"
+    message["Subject"] = "Továbbított: számlák és jegyzőkönyv"
+    message["Message-ID"] = "<kitalalt-eml-1@pelda.hu>"
+    message.set_content("Kedves Béla!\nMellékelem a számlákat tartalmazó archívumot.\nÜdv: Anna\n")
+    message.add_alternative(
+        "<p>Kedves Béla!</p><p>Mellékelem a <b>számlákat</b> tartalmazó archívumot.</p>"
+        "<script>document.title='HACKED'</script><p>Üdv: Anna</p>",
+        subtype="html",
+    )
+    for name, mime, data in attachments:
+        maintype, subtype = mime.split("/")
+        message.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+    for index, part in enumerate(part for part in message.walk() if part.is_multipart()):
+        part.set_boundary(f"===kitalalt-hatar-{index}===")
+    return message.as_bytes()
+
+
+def _archives(pdf: bytes, xlsx: bytes) -> dict[str, bytes]:
+    """ZIP with a nested ZIP and a disguised program, a password ZIP, a bomb-like ZIP, 7z files."""
+    def member(name: str) -> zipfile.ZipInfo:
+        # A fixed, fictional date keeps the fixtures identical between runs.
+        info = zipfile.ZipInfo(name, date_time=(2023, 5, 10, 16, 58, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        return info
+
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as archive:
+        archive.writestr(member("jegyzokonyv.txt"), "Átadás-átvételi jegyzőkönyv (kitalált)\nÁtvette: Teszt Béla\n")
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as archive:
+        archive.writestr(member("szamlak/szamla-2023-05.pdf"), pdf)
+        archive.writestr(member("szamlak/Kotberszamitas.xlsx"), xlsx)
+        archive.writestr(member("belso/jegyzokonyv.zip"), inner.getvalue())
+        # Not a real program: only the "MZ" signature, to show the disguise warning.
+        archive.writestr(member("fizetes_reszletek.pdf.exe"), b"MZ" + b"\x00" * 62 + b"Kitalalt, nem futtathato minta.")
+    bomb = io.BytesIO()
+    with zipfile.ZipFile(bomb, "w") as archive:
+        archive.writestr(member("nullak.bin"), b"\x00" * (12 * 1024 * 1024), compresslevel=9)
+    files = {
+        "archive.zip": outer.getvalue(),
+        "password.zip": _zipcrypto({"titkos-szamla.txt": "Kitalált titkos számla: 439 750 Ft\n".encode("utf-8")}, b"pelda123"),
+        "bomb.zip": bomb.getvalue(),
+    }
+    try:
+        import py7zr
+    except ImportError:
+        return files
+    for name, password in (("archive.7z", None), ("password.7z", "pelda123")):
+        output = io.BytesIO()
+        with py7zr.SevenZipFile(output, "w", password=password, header_encryption=bool(password)) as archive:
+            archive.writestr(pdf, "szamla-2023-05.pdf")
+            archive.writestr("Kitalált feljegyzés a 7z-archívumban.\n".encode("utf-8"), "feljegyzes.txt")
+        files[name] = output.getvalue()
+    return files
+
+
 def main() -> None:
     """Write every fixture next to this script."""
     text_pages = [
@@ -230,6 +490,12 @@ def main() -> None:
     xls = _xls()
     if xls is not None:
         files["sample.xls"] = xls
+    files.update(_archives(files["sample.pdf"], files["sample.xlsx"]))
+    files["message.msg"] = _msg(files["sample.pdf"])
+    files["message.eml"] = _eml([
+        ("szamlak.zip", "application/zip", files["archive.zip"]),
+        ("szerzodes.msg", "application/vnd.ms-outlook", files["message.msg"]),
+    ])
     for name, data in files.items():
         (HERE / name).write_bytes(data)
         print(f"{name}: {len(data)} bájt")

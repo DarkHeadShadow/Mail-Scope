@@ -1,0 +1,19 @@
+Project creator: Bálint Szabolcs
+
+7z attachment support uses the unmodified py7zr package and its compression
+helpers pyppmd, pybcj, inflate64 and multivolumefile, installed as separate
+Python packages and imported at run time only inside the isolated attachment
+worker process. They are not modified or statically combined with Mail-Scope.
+
+These packages are licensed under the GNU Lesser General Public License
+version 2.1 or later (LGPL-2.1-or-later). The upstream projects and license
+texts are available at:
+  https://github.com/miurahr/py7zr
+  https://github.com/miurahr/pyppmd
+  https://pypi.org/project/pybcj
+  https://github.com/miurahr/inflate64
+  https://github.com/miurahr/multivolume
+
+Users may replace these packages with modified versions of the same
+interface in the Python environment (or in the packaged build's library
+folder), as the LGPL allows.

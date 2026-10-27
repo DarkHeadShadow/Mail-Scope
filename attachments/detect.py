@@ -29,7 +29,7 @@ EXTENSION_KINDS = {
     "xlsx": {"xlsx"}, "xlsm": {"xlsx"}, "xltx": {"xlsx"},
     "pptx": {"pptx"}, "pptm": {"pptx"},
     "odt": {"odf"}, "ods": {"odf"}, "odp": {"odf"},
-    "doc": {"ole"}, "xls": {"ole"}, "ppt": {"ole"}, "msg": {"ole"},
+    "doc": {"ole"}, "xls": {"ole"}, "ppt": {"ole"}, "msg": {"msg"},
     "rtf": {"rtf"}, "csv": {"text"}, "eml": {"text", "email"},
     **{extension: {"text", "email"} for extension in TEXT_EXTENSIONS - {"eml"}},
 }
@@ -41,7 +41,8 @@ KIND_LABELS = {
     "zip": "ZIP-archívum", "7z": "7z-archívum", "rar": "RAR-archívum", "gzip": "gzip-archívum",
     "docx": "Word-dokumentum (DOCX)", "xlsx": "Excel-munkafüzet (XLSX)",
     "pptx": "PowerPoint-bemutató (PPTX)", "odf": "OpenDocument-fájl",
-    "ole": "OLE-fájl (régi Office vagy Outlook MSG)", "rtf": "RTF-dokumentum",
+    "ole": "OLE-fájl (régi Office-dokumentum)", "msg": "Outlook-levél (MSG)",
+    "rtf": "RTF-dokumentum",
     "exe": "Windows-program (futtatható)", "elf": "Linux-program (futtatható)",
     "email": "E-mail (RFC 5322)", "text": "Szöveg", "empty": "Üres fájl",
     "binary": "Ismeretlen bináris adat",
@@ -111,6 +112,10 @@ def _looks_like_text(sample: bytes) -> bool:
     return controls <= len(sample) // 100
 
 
+# Outlook MSG files are OLE files whose directory names MAPI property streams.
+_MSG_MARKER = "__substg1.0_".encode("utf-16-le")
+ARCHIVE_KINDS = {"zip", "7z", "rar", "gzip"}
+
 _EMAIL_HEADER = re.compile(rb"^(?:from|received|return-path|message-id|date|subject|mime-version):", re.I | re.M)
 
 
@@ -144,7 +149,7 @@ def detect(data: bytes, filename: str = "", declared_type: str = "") -> TypeInfo
     elif head.startswith(b"\x1f\x8b"):
         kind = "gzip"
     elif head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-        kind = "ole"
+        kind = "msg" if _MSG_MARKER in data else "ole"
     elif head.startswith(b"{\\rtf"):
         kind = "rtf"
     elif head.startswith(b"MZ"):
@@ -190,11 +195,15 @@ def detect(data: bytes, filename: str = "", declared_type: str = "") -> TypeInfo
         view = "xlsx"
     elif kind == "ole" and ext in {"xls", "xlt"}:
         view = "xls"
+    elif kind in ARCHIVE_KINDS:
+        view = "archive"
+    elif kind in {"email", "msg"}:
+        view = "email"
     elif ext in {"csv", "tsv"} and kind == "text":
         view = "table"
     elif kind == "text" and (ext in {"html", "htm"} or head.lstrip()[:200].lower().startswith((b"<!doctype html", b"<html"))):
         view = "html"
-    elif kind in {"text", "email"}:
+    elif kind == "text":
         view = "text"
     else:
         view = "none"

@@ -84,7 +84,7 @@ Each page has its own address (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/kerese
 
 Detailed search supports subject, full-text, sender, recipient, inclusive date boundaries, attachment presence, source path, folder, attachment media type, and label conditions. Conditions may be grouped with AND/OR; groups can also be combined with AND/OR.
 
-Attachments open in the built-in **attachment viewer** (from the reading pane, the conversation cards or the search results): an attachment tree, a safe preview (PDF pages with their text layer, Word documents, Excel workbooks with hidden sheets, formulas and comments, text with encoding detection, CSV tables, images re-encoded to PNG; HTML and Word documents are shown sanitized in a sandboxed frame; archives, attached Outlook messages and the LibreOffice “Pontos nézet” follow in later stages) and an analyst data sheet with the real type, SHA-256, location, warnings and the same file in other messages. Nothing in an attachment runs, raw files never go to the browser, and parsing happens in a separate, time- and memory-limited process. Attachments are saved only through **Mentés…**, with a `.sha256` and a provenance file.
+Attachments open in the built-in **attachment viewer** (from the reading pane, the conversation cards or the search results): an attachment tree, a safe preview (PDF pages with their text layer, Word documents, Excel workbooks with hidden sheets, formulas and comments, text with encoding detection, CSV tables, images re-encoded to PNG; HTML and Word documents are shown sanitized in a sandboxed frame; ZIP, 7z, gzip and, with an installed 7-Zip, RAR archives and attached EML/Outlook MSG messages open as tree branches in memory, with ZIP-bomb limits and session-only archive passwords; the LibreOffice “Pontos nézet” follows in a later stage) and an analyst data sheet with the real type, SHA-256, location, warnings and the same file in other messages. Nothing in an attachment runs, raw files never go to the browser, and parsing happens in a separate, time- and memory-limited process. Attachments are saved only through **Mentés…**, with a `.sha256` and a provenance file.
 
 Messages with attachments show a paperclip and the number of attachments in the search results, the archive list and the conversation timeline; hovering lists up to five file names. The **Csak melléklettel** toggle next to the search button limits the whole query to messages with at least one attachment (combined with AND, even when the groups are joined with OR). Saved searches keep the toggle, and the CSV, EML ZIP and PDF exports use the same filtered set; the CSV also has “Mellékletek száma” and “Mellékletek neve” columns.
 
@@ -129,6 +129,8 @@ Attachment viewer with the analyst data sheet (image with EXIF and GPS), and a d
 ![Mail-Scope attachment viewer flagging a disguised executable](./docs/screenshots/attachment-warning.png)
 
 ![Mail-Scope attachment viewer showing an Excel workbook with hidden sheets and a formula](./docs/screenshots/attachment-xlsx.png)
+
+![Mail-Scope attachment viewer showing a ZIP archive with a nested archive and a disguised program](./docs/screenshots/attachment-zip.png)
 
 Conversation view of two people:
 

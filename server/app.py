@@ -10,10 +10,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import sys
 import threading
+import uuid
 import zipfile
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -49,6 +51,7 @@ from attachments.service import (
     analysis as attachment_analysis,
     describe,
     document_html,
+    expand as expand_attachment,
     extracted_text,
     image_png,
     preview as attachment_preview,
@@ -84,6 +87,9 @@ VERIFICATION_MODES = {"signature", "full"}
 _VERIFICATION_MODE_KEY = "verification_mode"
 _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
+# A message attachment ("2") or a file inside archives / attached e-mails ("2/0/3").
+MAX_NESTING_DEPTH = 5
+_ATTACHMENT_PATH = re.compile(r"\d{1,4}(?:/\d{1,5}){0,5}")
 
 
 def _save_path_dialog(default_name: str, description: str) -> str:
@@ -178,6 +184,8 @@ class MailScopeApplication:
         self._readers: dict[tuple[str, str], SourceReader] = {}
         self._verifications: dict[int, dict[str, Any]] = {}
         self._attachment_cache: dict[int, dict[str, Any]] = {}
+        # Archive passwords live only in memory for this session: never stored or logged.
+        self._attachment_passwords: dict[tuple[int, str], str] = {}
         self.case_log: Path | None = None
 
     def select_case(self, path: str) -> dict[str, Any]:
@@ -211,6 +219,8 @@ class MailScopeApplication:
             self._close_readers()
             self._verifications = {}
             self._attachment_cache = {}
+            self._attachment_passwords = {}
+            shutil.rmtree(case_path / ".mailscope" / "tmp", ignore_errors=True)
             self.job = None
             self._recent_counts = None
             return self.status()
@@ -1014,14 +1024,88 @@ class MailScopeApplication:
         return loaded
 
     def _attachment(self, message_id: int, path: str) -> tuple[dict[str, Any], dict[str, Any], bytes]:
-        """Return the loaded message context, one attachment entry, and its bytes."""
-        if not re.fullmatch(r"\d{1,4}", path):
+        """Return the loaded message context, one attachment entry, and its bytes.
+
+        ``path`` is ``2`` for a message attachment or ``2/0/3`` for a file
+        inside an archive or attached e-mail; each level is unpacked once.
+        """
+        if not _ATTACHMENT_PATH.fullmatch(path):
             raise ApiError(HTTPStatus.NOT_FOUND, "Érvénytelen mellékletazonosító.")
         loaded = self._load_attachments(message_id)
-        index = int(path)
-        if index >= len(loaded["entries"]):
+        parts = [int(part) for part in path.split("/")]
+        if parts[0] >= len(loaded["entries"]):
             raise ApiError(HTTPStatus.NOT_FOUND, "A melléklet nem található.")
-        return loaded, loaded["entries"][index], loaded["data"][index]
+        entry, data = loaded["entries"][parts[0]], loaded["data"][parts[0]]
+        for part in parts[1:]:
+            expansion = self._expansion(message_id, loaded, entry, data)
+            if part >= len(expansion["entries"]):
+                raise ApiError(HTTPStatus.NOT_FOUND, "A melléklet nem található.")
+            entry, data = expansion["entries"][part], expansion["data"][part]
+        return loaded, entry, data if data is not None else b""
+
+    def _expansion(
+        self, message_id: int, loaded: dict[str, Any], entry: dict[str, Any], data: bytes | None
+    ) -> dict[str, Any]:
+        """Unpack an archive or attached e-mail once and keep its files in memory."""
+        expansions = loaded.setdefault("expansions", {})
+        cached = expansions.get(entry["path"])
+        if cached is not None:
+            return cached
+        if entry.get("container") is None or not data:
+            raise ApiError(HTTPStatus.NOT_FOUND, "Ez a melléklet nem bontható ki.")
+        if entry["path"].count("/") >= MAX_NESTING_DEPTH:
+            raise ApiError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                f"Az archívumok legfeljebb {MAX_NESTING_DEPTH} szint mélyen bonthatók ki.",
+            )
+        work_dir = self._require_case_directory() / ".mailscope" / "tmp" / uuid.uuid4().hex
+        try:
+            expansion = expand_attachment(
+                entry, data, self._attachment_passwords.get((message_id, entry["path"])), work_dir
+            )
+        except AttachmentProcessingError as error:
+            logger.warning("Attachment expansion failed: message %s/%s: %s", message_id, entry["path"], error)
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        expansions[entry["path"]] = expansion
+        recorded = [child for child in expansion["entries"] if child["sha256"]]
+        if recorded:
+            try:
+                loaded["database"].record_attachment_files(message_id, recorded)
+            except DatabaseBusyError:
+                logger.warning("Nested attachment hashes not recorded (database busy): message %s", message_id)
+        if expansion.get("stopped"):
+            logger.warning("Archive not unpacked: message %s/%s: %s", message_id, entry["path"], expansion["stopped"])
+        return expansion
+
+    def attachment_children(self, message_id: int, path: str) -> dict[str, Any]:
+        """List the files of an archive or attached e-mail, unpacking it if needed."""
+        loaded, entry, data = self._attachment(message_id, path)
+        expansion = self._expansion(message_id, loaded, entry, data)
+        return {key: value for key, value in expansion.items() if key != "data"}
+
+    def set_attachment_password(self, message_id: int, path: str, password: str) -> dict[str, Any]:
+        """Remember an archive password for this session and unpack the archive again."""
+        loaded, entry, _ = self._attachment(message_id, path)
+        if entry.get("container") != "archive":
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Jelszót csak archívumhoz lehet megadni.")
+        if len(password) > 1024:
+            raise ValueError("A jelszó túl hosszú.")
+        key = (message_id, path)
+        if password:
+            self._attachment_passwords[key] = password
+        else:
+            self._attachment_passwords.pop(key, None)
+        expansions = loaded.setdefault("expansions", {})
+        for cached_path in [item for item in expansions if item == path or item.startswith(f"{path}/")]:
+            expansions.pop(cached_path)
+        result = self.attachment_children(message_id, path)
+        logger.info(
+            "Archive password %s: message %s/%s (password_error=%s)",
+            "set" if password else "cleared", message_id, path, result.get("password_error"),
+        )
+        return result
 
     def message_attachments(self, message_id: int) -> dict[str, Any]:
         """List a message's attachments with their real types and warnings."""
@@ -1030,8 +1114,8 @@ class MailScopeApplication:
 
     def attachment_info(self, message_id: int, path: str) -> dict[str, Any]:
         """Return the analyst data sheet of one attachment."""
-        loaded, entry, _ = self._attachment(message_id, path)
-        elsewhere = [
+        loaded, entry, data = self._attachment(message_id, path)
+        elsewhere = [] if not entry["sha256"] else [
             {
                 "message_id": int(row["message_id"]),
                 "position": str(row["position"]),
@@ -1044,13 +1128,16 @@ class MailScopeApplication:
         ]
         details: dict[str, Any] = {}
         try:
-            details = attachment_analysis(PreviewCache(self._require_case_directory()), entry, loaded["data"][int(path)])
-        except AttachmentProcessingError as error:
+            if entry.get("container") and data:
+                details = _container_details(self._expansion(message_id, loaded, entry, data))
+            else:
+                details = attachment_analysis(PreviewCache(self._require_case_directory()), entry, data)
+        except (AttachmentProcessingError, ApiError) as error:
             logger.warning("Attachment analysis failed: message %s/%s: %s", message_id, path, error)
-            details = {"analysis_error": str(error)}
+            details = {"analysis_error": str(getattr(error, "message", error))}
         return {
             **entry,
-            "location": f"{loaded['location']} › {int(path) + 1}. melléklet",
+            "location": f"{loaded['location']} › {entry['trail']}",
             "message": loaded["summary"],
             "same_elsewhere": elsewhere,
             "metadata": details.get("metadata", {}),
@@ -1065,6 +1152,8 @@ class MailScopeApplication:
     ) -> dict[str, Any]:
         """Render or fetch the cached preview of one attachment in the isolated worker."""
         loaded, entry, data = self._attachment(message_id, path)
+        if entry["view"] == "archive":
+            return {"kind": "archive", **self.attachment_children(message_id, path)}
         cache = PreviewCache(self._require_case_directory())
         try:
             result = attachment_preview(cache, entry, data, page, sheet)
@@ -1112,6 +1201,8 @@ class MailScopeApplication:
     def save_attachment(self, message_id: int, path: str) -> dict[str, Any]:
         """Save one attachment with a .sha256 file and a provenance note, then log it."""
         loaded, entry, data = self._attachment(message_id, path)
+        if not entry["sha256"]:
+            raise ApiError(HTTPStatus.CONFLICT, "Ez a fájl nincs kibontva, ezért nem menthető külön; mentse az archívumot.")
         target = _save_path_dialog(_safe_filename(entry["name"]), "Melléklet")
         if not target:
             return {"cancelled": True}
@@ -1129,7 +1220,7 @@ class MailScopeApplication:
                     f"Méret: {entry['size']} bájt",
                     f"Megadott típus: {entry['declared_type'] or '—'}",
                     f"Valódi típus: {entry['real_label']}",
-                    f"Hely: {loaded['location']} › {int(path) + 1}. melléklet",
+                    f"Hely: {loaded['location']} › {entry['trail']}",
                     f"Forrásfájl: {loaded['source'].path}",
                     f"Forrás SHA-256: {loaded['source'].sha256}",
                     f"Levél: {loaded['summary']['subject'] or '(nincs tárgy)'}",
@@ -1480,7 +1571,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     self.server.application.message_attachments(int(match.group(1))),
                 )
             elif match := re.fullmatch(
-                r"/api/attachments/(\d+)/(\d+)/(info|preview|image|document|text)", request.path
+                rf"/api/attachments/(\d+)/({_ATTACHMENT_PATH.pattern})/(info|preview|image|document|text|children)",
+                request.path,
             ):
                 message_id, path, action = int(match.group(1)), match.group(2), match.group(3)
                 query = parse_qs(request.query)
@@ -1495,6 +1587,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     )
                 elif action == "text":
                     self._send_json(HTTPStatus.OK, self.server.application.attachment_text(message_id, path))
+                elif action == "children":
+                    self._send_json(HTTPStatus.OK, self.server.application.attachment_children(message_id, path))
                 elif action == "document":
                     self._send_bytes(
                         HTTPStatus.OK,
@@ -1647,8 +1741,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.start_index(paths)
             elif path == "/api/index/cancel":
                 response = self.server.application.cancel_index()
-            elif match := re.fullmatch(r"/api/attachments/(\d+)/(\d+)/save", path):
+            elif match := re.fullmatch(rf"/api/attachments/(\d+)/({_ATTACHMENT_PATH.pattern})/save", path):
                 response = self.server.application.save_attachment(int(match.group(1)), match.group(2))
+            elif match := re.fullmatch(rf"/api/attachments/(\d+)/({_ATTACHMENT_PATH.pattern})/password", path):
+                password = payload.get("password", "")
+                if not isinstance(password, str):
+                    raise ValueError("A jelszó szöveg legyen.")
+                response = self.server.application.set_attachment_password(
+                    int(match.group(1)), match.group(2), password
+                )
             elif match := re.fullmatch(r"/api/messages/(\d+)/attachments/save-all", path):
                 response = self.server.application.save_all_attachments(int(match.group(1)))
             elif path == "/api/people/auto":
@@ -2048,6 +2149,33 @@ def default_recent_cases_file() -> Path:
     """Return the per-user recent-case list under %APPDATA%\\Mail-Scope."""
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     return Path(base) / "Mail-Scope" / "recent.json"
+
+
+def _container_details(expansion: dict[str, Any]) -> dict[str, Any]:
+    """Summarize an unpacked archive or attached e-mail for the data sheet."""
+    entries = expansion["entries"]
+    signals: list[str] = []
+    if expansion.get("stopped"):
+        signals.append(expansion["stopped"])
+    if expansion.get("needs_password"):
+        signals.append("Jelszóval védett tartalom: a fájlok a jelszó megadása után bonthatók ki.")
+    if expansion.get("password_error"):
+        signals.append("A megadott jelszó hibás.")
+    signals.extend(expansion.get("warnings", []))
+    risky = [entry["inner_path"] for entry in entries if entry["warnings"]]
+    if risky:
+        signals.append(f"Figyelmeztetéssel jelölt fájl a tartalomban: {', '.join(risky[:5])}{' …' if len(risky) > 5 else ''}")
+    if expansion["container"] == "email":
+        metadata = {"Formátum": expansion["format"], "Mellékletek": str(len(entries))}
+        return {"metadata": metadata, "signals": signals}
+    metadata = {
+        "Formátum": expansion["format"],
+        "Bejegyzések": str(expansion["total_entries"]),
+        "Kibontott méret": f"{expansion['total_size']:,} bájt".replace(",", " "),
+        "Tömörítési arány": f"{expansion['ratio']}:1",
+        "Titkosított fájl": str(sum(1 for entry in entries if entry.get("encrypted"))),
+    }
+    return {"metadata": metadata, "signals": signals}
 
 
 _WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}

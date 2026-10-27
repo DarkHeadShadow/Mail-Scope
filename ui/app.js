@@ -105,7 +105,7 @@ const ROUTE_ORDER = Object.keys(ROUTES);
  * Read the page name from a "#/name" hash, falling back to the case page.
  */
 function currentRoute() {
-  const viewer = window.location.hash.match(/^#\/melleklet\/(\d+)\/(\d+)$/);
+  const viewer = window.location.hash.match(/^#\/melleklet\/(\d+)\/(\d+(?:\/\d+){0,5})$/);
   if (viewer) {
     state.viewerTarget = { messageId: Number(viewer[1]), path: viewer[2] };
     return "melleklet";
@@ -2126,6 +2126,11 @@ element("export-search-pdf-button").addEventListener("click", printDetailedSearc
  * Open the attachment viewer for a message, at an index or a file name.
  */
 function openAttachmentViewer(messageId, target = {}) {
+  if (typeof target.path === "string") {
+    state.viewerPreferredName = null;
+    window.location.hash = `#/melleklet/${messageId}/${target.path}`;
+    return;
+  }
   let index = Number.isInteger(target.index) ? target.index : 0;
   state.viewerPreferredName = null;
   if (target.name) {
@@ -2153,7 +2158,12 @@ async function loadViewer() {
     if (!state.viewer || state.viewer.messageId !== target.messageId) {
       element("viewer-preview").replaceChildren(viewerMessage("A mellékletek betöltése és a forrás ellenőrzése…"));
       const listing = await requestJson(`/api/messages/${target.messageId}/attachments`);
-      state.viewer = { messageId: target.messageId, ...listing, zoom: 100, page: 0 };
+      state.viewer = {
+        messageId: target.messageId, ...listing, zoom: 100, page: 0,
+        nodes: new Map(listing.attachments.map((item) => [item.path, item])),
+        expansions: new Map(),
+        expanded: new Set(),
+      };
       if (state.viewerPreferredName) {
         const index = listing.attachments.findIndex((item) => item.name === state.viewerPreferredName);
         state.viewerPreferredName = null;
@@ -2178,6 +2188,7 @@ async function loadViewer() {
       return;
     }
     const path = state.viewerTarget.path;
+    await ensureViewerPath(path);
     if (viewer.path !== path) {
       viewer.path = path;
       viewer.page = 0;
@@ -2189,11 +2200,13 @@ async function loadViewer() {
       viewer.pdfText = null;
     }
     renderViewerTree();
-    const entry = viewer.attachments[Number(path)] || viewer.attachments[0];
+    const entry = viewer.nodes.get(path) || viewer.attachments[0];
+    const siblings = viewerSiblings(entry.path);
+    const position = siblings.findIndex((item) => item.path === entry.path);
     element("attachment-viewer-title").textContent = entry.name;
-    element("viewer-position").textContent = `${Number(path) + 1} / ${viewer.attachments.length}`;
-    element("viewer-prev").disabled = Number(path) === 0;
-    element("viewer-next").disabled = Number(path) >= viewer.attachments.length - 1;
+    element("viewer-position").textContent = `${position + 1} / ${siblings.length}`;
+    element("viewer-prev").disabled = position <= 0;
+    element("viewer-next").disabled = position >= siblings.length - 1;
     element("viewer-zoom").textContent = `${viewer.zoom}%`;
     const [info, preview] = await Promise.all([
       requestJson(`/api/attachments/${viewer.messageId}/${path}/info`),
@@ -2202,6 +2215,8 @@ async function loadViewer() {
         .catch((error) => ({ kind: "error", reason: error.message })),
     ]);
     viewer.preview = preview || { kind: "none", reason: "" };
+    if (preview && preview.kind === "archive") registerViewerChildren(entry.path, preview);
+    renderViewerTree();
     renderViewerSheet(info);
     renderViewerPreview(entry, info);
   } catch (error) {
@@ -2222,35 +2237,133 @@ function viewerMessage(text, isError = false) {
 }
 
 /**
- * List the message's attachments; risky ones carry a warning marker.
+ * Remember the files of an unpacked archive or attached e-mail in the tree.
+ */
+function registerViewerChildren(path, result) {
+  const viewer = state.viewer;
+  viewer.expansions.set(path, result);
+  viewer.expanded.add(path);
+  result.entries.forEach((item) => viewer.nodes.set(item.path, item));
+}
+
+/**
+ * Fetch (once) the files inside an archive or attached e-mail.
+ */
+async function fetchViewerChildren(path) {
+  const viewer = state.viewer;
+  if (!viewer.expansions.has(path)) {
+    const result = await requestJson(`/api/attachments/${viewer.messageId}/${path}/children`);
+    if (state.viewer !== viewer) return;
+    registerViewerChildren(path, result);
+  }
+  viewer.expanded.add(path);
+}
+
+/**
+ * Unpack every archive level above a nested path (e.g. opened from a link).
+ */
+async function ensureViewerPath(path) {
+  const parts = path.split("/");
+  for (let depth = 1; depth < parts.length; depth += 1) {
+    await fetchViewerChildren(parts.slice(0, depth).join("/"));
+  }
+}
+
+/**
+ * The attachments on the same level as a path: the message's or a container's.
+ */
+function viewerSiblings(path) {
+  const viewer = state.viewer;
+  const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null;
+  if (parent === null) return viewer.attachments;
+  const expansion = viewer.expansions.get(parent);
+  return expansion ? expansion.entries : [];
+}
+
+/**
+ * List the message's attachments as a tree; archives and attached e-mails
+ * open into branches, and risky files carry a warning marker.
  */
 function renderViewerTree() {
   const viewer = state.viewer;
   const list = element("viewer-tree-list");
   list.replaceChildren();
   element("viewer-count").textContent = `(${viewer.attachments.length})`;
-  viewer.attachments.forEach((entry, index) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = "viewer-tree-item";
-    const selected = String(index) === state.viewerTarget.path;
-    item.classList.toggle("selected", selected);
-    item.classList.toggle("warning", entry.warnings.length > 0);
-    item.setAttribute("aria-current", selected ? "true" : "false");
-    const kind = document.createElement("span");
-    kind.className = "viewer-kind";
-    kind.textContent = entry.executable ? "EXE" : entry.real_kind.toUpperCase().slice(0, 4);
-    const name = document.createElement("span");
-    name.className = "viewer-tree-name";
-    name.textContent = entry.name;
-    const meta = document.createElement("small");
-    meta.textContent = `${formatBytes(entry.size)}${entry.warnings.length ? " · figyelmeztetés" : ""}`;
-    item.append(kind, name, meta);
-    item.addEventListener("click", () => {
-      window.location.hash = `#/melleklet/${viewer.messageId}/${index}`;
+  const addLevel = (entries, depth) => {
+    entries.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "viewer-tree-row";
+      row.style.setProperty("--depth", String(depth));
+      if (entry.container && entry.unpacked !== false) {
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "viewer-tree-toggle";
+        const open = viewer.expanded.has(entry.path);
+        toggle.textContent = open ? "▾" : "▸";
+        toggle.setAttribute("aria-expanded", String(open));
+        toggle.setAttribute("aria-label", `${entry.name} ${open ? "összecsukása" : "kibontása"}`);
+        toggle.addEventListener("click", async () => {
+          if (viewer.expanded.has(entry.path)) {
+            viewer.expanded.delete(entry.path);
+          } else {
+            toggle.textContent = "…";
+            try {
+              await fetchViewerChildren(entry.path);
+            } catch (error) {
+              element("viewer-notice").textContent = error.message;
+              element("viewer-notice").classList.add("error");
+            }
+          }
+          renderViewerTree();
+        });
+        row.append(toggle);
+      } else {
+        const spacer = document.createElement("span");
+        spacer.className = "viewer-tree-toggle placeholder";
+        row.append(spacer);
+      }
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "viewer-tree-item";
+      const selected = entry.path === state.viewerTarget.path;
+      item.classList.toggle("selected", selected);
+      item.classList.toggle("warning", entry.warnings.length > 0);
+      item.classList.toggle("locked", entry.unpacked === false);
+      item.setAttribute("aria-current", selected ? "true" : "false");
+      const kind = document.createElement("span");
+      kind.className = "viewer-kind";
+      if (entry.executable) kind.textContent = "EXE";
+      else if (entry.unpacked === false) kind.textContent = entry.encrypted ? "JELSZÓ" : "—";
+      else kind.textContent = entry.real_kind === "email" ? "EML" : entry.real_kind.toUpperCase().slice(0, 4);
+      const name = document.createElement("span");
+      name.className = "viewer-tree-name";
+      name.textContent = entry.name;
+      name.title = entry.inner_path || entry.name;
+      const meta = document.createElement("small");
+      const inner = entry.inner_path || "";
+      const folder = inner.includes("/") ? `${inner.slice(0, inner.lastIndexOf("/"))}/ · ` : "";
+      meta.textContent = `${folder}${formatBytes(entry.size)}${entry.encrypted ? " · jelszavas" : ""}${entry.warnings.length ? " · figyelmeztetés" : ""}`;
+      item.append(kind, name, meta);
+      item.addEventListener("click", () => {
+        window.location.hash = `#/melleklet/${viewer.messageId}/${entry.path}`;
+      });
+      row.append(item);
+      list.append(row);
+      const expansion = viewer.expansions.get(entry.path);
+      if (expansion && viewer.expanded.has(entry.path)) {
+        if (expansion.stopped || expansion.needs_password || !expansion.entries.length) {
+          const note = document.createElement("p");
+          note.className = `viewer-tree-note${expansion.stopped ? " error" : ""}`;
+          note.style.setProperty("--depth", String(depth + 1));
+          note.textContent = expansion.stopped
+            || (expansion.needs_password ? "Jelszóval védett – a jelszót az archívum nézetében adhatja meg." : "Nincs benne fájl.");
+          list.append(note);
+        }
+        addLevel(expansion.entries, depth + 1);
+      }
     });
-    list.append(item);
-  });
+  };
+  addLevel(viewer.attachments, 0);
 }
 
 /**
@@ -2285,7 +2398,9 @@ function renderViewerSheet(info) {
   row(file, "Megadott típus", info.declared_type || "—");
   const typeMismatch = info.warnings.some((warning) => /álcázott|mást ígér|megadott típus|nem ismerhető fel/.test(warning));
   row(file, "Valódi típus", `${info.real_label} · ${typeMismatch ? "ELTÉR a megadottól" : "egyezik"}`, typeMismatch ? "error" : "ok");
-  row(file, "SHA-256", info.sha256, "mono");
+  row(file, "SHA-256", info.sha256 || "— (a fájl nincs kibontva)", "mono");
+  if (info.inner_path) row(file, "Útvonal", info.inner_path);
+  if (info.modified) row(file, "Módosítva", info.modified);
   row(file, "Hely", info.location);
 
   if (info.metadata && Object.keys(info.metadata).length) {
@@ -2341,7 +2456,7 @@ function renderViewerSheet(info) {
       link.type = "button";
       link.className = "viewer-duplicate";
       link.textContent = `${item.subject || "(nincs tárgy)"} · ${item.sender || "?"} · ${formatTimestamp(item.sent_timestamp)}`;
-      link.addEventListener("click", () => openAttachmentViewer(item.message_id, { index: Number(item.position) }));
+      link.addEventListener("click", () => openAttachmentViewer(item.message_id, { path: String(item.position) }));
       duplicates.append(link);
     });
   }
@@ -2366,7 +2481,11 @@ function renderViewerPreview(entry, info) {
     return;
   }
   const query = element("viewer-search").value.trim();
-  if (preview.kind === "pdf") {
+  if (preview.kind === "archive") {
+    renderArchivePreview(area, entry, preview, query);
+  } else if (preview.kind === "email") {
+    renderEmailPreview(area, entry, preview, query);
+  } else if (preview.kind === "pdf") {
     renderPdfPreview(area, entry, preview, query);
   } else if (preview.kind === "sheet") {
     renderSheetPreview(area, preview, query);
@@ -2412,6 +2531,153 @@ function renderViewerPreview(entry, info) {
   }
   const firstMark = area.querySelector("mark");
   if (firstMark) firstMark.scrollIntoView({ block: "center" });
+}
+
+/**
+ * Archive contents: totals, bomb or password state, and a clickable file table.
+ */
+function renderArchivePreview(area, entry, preview, query) {
+  const viewer = state.viewer;
+  const meta = document.createElement("p");
+  meta.className = "muted";
+  meta.textContent = `${preview.format}-archívum · ${preview.total_entries} fájl · kibontva ${formatBytes(preview.total_size)} · tömörítési arány ${preview.ratio}:1`;
+  area.append(meta);
+  if (preview.stopped) area.append(viewerMessage(preview.stopped, true));
+  (preview.warnings || []).forEach((warning) => {
+    const line = document.createElement("p");
+    line.className = "viewer-warning";
+    line.textContent = warning;
+    area.append(line);
+  });
+  if (preview.needs_password || preview.password_error) {
+    const form = document.createElement("form");
+    form.className = "viewer-password";
+    const label = document.createElement("label");
+    label.textContent = preview.password_error ? "A jelszó hibás. Próbálja újra:" : "Az archívum jelszóval védett. Ismert jelszó:";
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.id = "viewer-password-input";
+    label.htmlFor = input.id;
+    const button = document.createElement("button");
+    button.type = "submit";
+    button.className = "button";
+    button.textContent = "Kibontás jelszóval";
+    const note = document.createElement("small");
+    note.className = "muted";
+    note.textContent = "A jelszó nem kerül mentésre és naplóba: csak a program bezárásáig él a memóriában.";
+    form.append(label, input, button, note);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      try {
+        const result = await requestJson(`/api/attachments/${viewer.messageId}/${entry.path}/password`, {
+          method: "POST",
+          body: JSON.stringify({ password: input.value }),
+        });
+        [...viewer.expansions.keys()]
+          .filter((path) => path.startsWith(`${entry.path}/`))
+          .forEach((path) => viewer.expansions.delete(path));
+        registerViewerChildren(entry.path, result);
+        viewer.preview = { kind: "archive", ...result };
+        renderViewerTree();
+        renderViewerPreview(entry, { warnings: entry.warnings });
+      } catch (error) {
+        button.disabled = false;
+        element("viewer-notice").textContent = error.message;
+        element("viewer-notice").classList.add("error");
+      }
+    });
+    area.append(form);
+  }
+  if (!preview.entries.length) return;
+  const wrapper = document.createElement("div");
+  wrapper.className = "viewer-table-wrapper";
+  const table = document.createElement("table");
+  table.className = "viewer-table viewer-archive-table";
+  const head = document.createElement("tr");
+  ["Fájl", "Méret", "Tömörítve", "Valódi típus", "Módosítva", "Állapot"].forEach((title) => {
+    const th = document.createElement("th");
+    th.textContent = title;
+    head.append(th);
+  });
+  table.append(head);
+  preview.entries.forEach((item) => {
+    const tr = document.createElement("tr");
+    if (item.warnings.length) tr.classList.add("warning");
+    const nameCell = document.createElement("td");
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "viewer-link";
+    appendHighlightedText(open, item.inner_path || item.name, query);
+    open.addEventListener("click", () => { window.location.hash = `#/melleklet/${viewer.messageId}/${item.path}`; });
+    nameCell.append(open);
+    const status = item.unpacked === false
+      ? (item.reason || "nincs kibontva")
+      : (item.warnings.length ? item.warnings.join(" ") : "rendben");
+    [formatBytes(item.size), item.compressed == null ? "—" : formatBytes(item.compressed), item.real_label, item.modified || "—", status]
+      .forEach((value) => {
+        const td = document.createElement("td");
+        td.textContent = value;
+        tr.append(td);
+      });
+    tr.prepend(nameCell);
+    table.append(tr);
+  });
+  wrapper.append(table);
+  area.append(wrapper);
+  if (preview.stopped && preview.total_entries > preview.entries.length) {
+    const more = document.createElement("p");
+    more.className = "muted";
+    more.textContent = `Az első ${preview.entries.length} bejegyzés látszik a ${preview.total_entries}-ból.`;
+    area.append(more);
+  }
+}
+
+/**
+ * Attached e-mail (EML or MSG): headers, body (formatted in the sandbox or as
+ * text) and its own attachments, which also appear in the tree.
+ */
+function renderEmailPreview(area, entry, preview, query) {
+  const viewer = state.viewer;
+  const card = document.createElement("div");
+  card.className = "viewer-email-headers";
+  preview.headers.forEach(([name, value]) => {
+    const line = document.createElement("div");
+    line.className = "viewer-sheet-row";
+    const key = document.createElement("span");
+    key.textContent = { From: "Feladó", To: "Címzett", Cc: "Másolat", Bcc: "Titkos másolat", "Reply-To": "Válaszcím", Date: "Dátum", Subject: "Tárgy", "Message-ID": "Message-ID", "In-Reply-To": "Válasz erre" }[name] || name;
+    const text = document.createElement("strong");
+    appendHighlightedText(text, value, query);
+    line.append(key, text);
+    card.append(line);
+  });
+  area.append(card);
+  if (preview.converted) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "Outlook MSG: a fejlécek és a törzs a fájl MAPI-tulajdonságaiból állnak össze.";
+    area.append(note);
+  }
+  if (preview.attachments.length) {
+    const list = document.createElement("div");
+    list.className = "viewer-hits";
+    list.textContent = "Mellékletei: ";
+    preview.attachments.forEach((name, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button quiet";
+      button.textContent = name;
+      button.addEventListener("click", () => { window.location.hash = `#/melleklet/${viewer.messageId}/${entry.path}/${index}`; });
+      list.append(button);
+    });
+    area.append(list);
+  }
+  if (preview.formatted) {
+    renderFormattedPreview(area, entry, preview, query);
+  } else {
+    area.append(textToolbar(preview), textBlock(preview.text, query));
+  }
 }
 
 /**
@@ -2685,7 +2951,7 @@ function viewerPager(page, pages) {
  */
 async function refreshViewerPreview() {
   const viewer = state.viewer;
-  const entry = viewer.attachments[Number(viewer.path)];
+  const entry = viewer.nodes.get(viewer.path);
   try {
     viewer.preview = await requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}&sheet=${viewer.sheet || 0}`);
     renderViewerPreview(entry, { warnings: entry.warnings });
@@ -2701,9 +2967,10 @@ async function refreshViewerPreview() {
 function stepViewer(delta) {
   const viewer = state.viewer;
   if (!viewer || viewer.attachments.length === 0) return;
-  const index = Number(state.viewerTarget.path) + delta;
-  if (index < 0 || index >= viewer.attachments.length) return;
-  window.location.hash = `#/melleklet/${viewer.messageId}/${index}`;
+  const siblings = viewerSiblings(state.viewerTarget.path);
+  const index = siblings.findIndex((item) => item.path === state.viewerTarget.path) + delta;
+  if (index < 0 || index >= siblings.length) return;
+  window.location.hash = `#/melleklet/${viewer.messageId}/${siblings[index].path}`;
 }
 
 /**
@@ -2714,7 +2981,7 @@ function zoomViewer(delta) {
   if (!viewer) return;
   viewer.zoom = Math.min(400, Math.max(25, viewer.zoom + delta));
   element("viewer-zoom").textContent = `${viewer.zoom}%`;
-  const entry = viewer.attachments[Number(viewer.path)];
+  const entry = viewer.nodes.get(viewer.path);
   if (entry) renderViewerPreview(entry, { warnings: entry.warnings });
 }
 
@@ -2757,7 +3024,7 @@ element("viewer-save").addEventListener("click", () => saveFromViewer(false));
 element("viewer-save-all").addEventListener("click", () => saveFromViewer(true));
 element("viewer-search").addEventListener("input", () => {
   const viewer = state.viewer;
-  const entry = viewer && viewer.attachments[Number(viewer.path)];
+  const entry = viewer && viewer.nodes.get(viewer.path);
   if (entry) renderViewerPreview(entry, { warnings: entry.warnings });
 });
 document.addEventListener("keydown", (event) => {

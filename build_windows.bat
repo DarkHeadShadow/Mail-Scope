@@ -23,15 +23,21 @@ call ".venv\Scripts\python.exe" -m PyInstaller ^
     --noconsole ^
     --name Mail-Scope ^
     --icon "assets\logo\mail-scope.ico" ^
+    --additional-hooks-dir build_hooks ^
     --add-data "ui;ui" ^
     --add-data "assets\logo;assets\logo" ^
     --add-data "LICENSE;." ^
     --add-data "LICENSES\NOTICE_libpff.txt;LICENSES" ^
+    --add-data "LICENSES\NOTICE_py7zr.txt;LICENSES" ^
     --add-data "THIRD_PARTY_NOTICES.md;." ^
     --collect-all pypff ^
     --collect-all pypdfium2 ^
     --collect-all pypdfium2_raw ^
     --collect-all nh3 ^
+    --collect-all py7zr ^
+    --collect-all pyppmd ^
+    --collect-all pybcj ^
+    --collect-all inflate64 ^
     run_mailscope.py
 if errorlevel 1 exit /b 1
 
