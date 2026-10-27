@@ -218,6 +218,23 @@ class PstReader:
                 raise IndexError(f"No attachment at index {index}")
             return _read_attachment(item.get_attachment(index), index)
 
+    def open_attachments(self, locator: MessageLocator) -> list[Attachment]:
+        """Load all attachments of one item into memory; unreadable ones carry an error."""
+        attachments: list[Attachment] = []
+        with self._resolve_item(locator) as item:
+            names = _attachment_metadata(item)
+            for index in range(_attachment_count(item)):
+                try:
+                    attachments.append(_read_attachment(item.get_attachment(index), index))
+                except Exception as error:
+                    filename, content_type = names[index] if index < len(names) else (
+                        f"attachment-{index + 1}", "application/octet-stream"
+                    )
+                    attachments.append(
+                        Attachment(filename, content_type, b"", error=f"{type(error).__name__}: {error}")
+                    )
+        return attachments
+
     def _open_store(self) -> Any:
         """Open one read-only libpff file handle for the duration of an operation."""
         store = self._pypff.file()

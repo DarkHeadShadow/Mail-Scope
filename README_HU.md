@@ -84,6 +84,8 @@ Minden lapnak saját címe van (`#/ugy`, `#/archivum`, `#/beszelgetes`, `#/keres
 
 A részletes keresés tárgy, teljes szöveg, feladó, címzett, kezdő/záró dátum, melléklet megléte, forrásútvonal, mappa, melléklet MIME-típusa és címke alapján szűr. A feltételek csoportosíthatók, a csoportok között és csoporton belül is választható az ÉS/VAGY kapcsolat.
 
+A mellékletek a beépített **melléklet-nézegetőben** nyílnak meg (az olvasópanelből, a beszélgetés-buborékokból vagy a keresési találatokból): mellékletfa, biztonságos előnézet (szöveg kódolásfelismeréssel, CSV-tábla, PNG-be újrakódolt kép; a PDF és az Office-fájlok későbbi szakaszban jönnek) és elemzői adatlap a valódi típussal, SHA-256-tal, hellyel, figyelmeztetésekkel és az ugyanilyen fájlt tartalmazó más levelekkel. A mellékletből semmi nem fut, nyers fájl nem kerül a böngészőbe, a feldolgozás pedig külön, idő- és memóriakorlátos folyamatban történik. Melléklet csak a **Mentés…** gombbal kerül ki, `.sha256` és eredetleíró fájllal.
+
 A mellékletes leveleknél a találatokban, az Archívum listájában és a beszélgetés-idővonalon gemkapocs és a mellékletek száma látszik; fölé állva a program legfeljebb öt fájlnevet sorol fel. A Keresés gomb melletti **Csak melléklettel** kapcsoló az egész lekérdezést a legalább egy melléklettel rendelkező levelekre szűkíti (ÉS kapcsolattal, akkor is, ha a csoportok között VAGY áll). A mentett keresés megőrzi a kapcsoló állását, a CSV, EML ZIP és PDF export pedig ugyanazt a szűrt halmazt adja; a CSV-ben „Mellékletek száma” és „Mellékletek neve” oszlop is van.
 
 ## Ismert korlátozások
@@ -119,6 +121,12 @@ Archívum böngésző megnyitott levéllel és forenzikus adatokkal:
 Személyek lap az automatikus csoportosítással és a szerkesztővel:
 
 ![Mail-Scope személyek lap automatikus és szerkesztett személyekkel](./docs/screenshots/people.png)
+
+Melléklet-nézegető az elemzői adatlappal (kép EXIF- és GPS-adattal), illetve egy álcázott futtatható fájl jelzése:
+
+![Mail-Scope melléklet-nézegető képpel és adatlappal](./docs/screenshots/attachment-viewer.png)
+
+![Mail-Scope melléklet-nézegető álcázott futtatható fájl jelzésével](./docs/screenshots/attachment-warning.png)
 
 Két személy beszélgetésnézete:
 

@@ -328,6 +328,71 @@ body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
   .detailed-result-labels { grid-column: 2; }
   .conversation-from-result { grid-column: 3; grid-row: 1 / span 2; }
 }
+/* Attachment viewer */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.attachment-badge.suspicious { color: #f2b544; }
+.attachment-open { padding: 0; border: 0; background: transparent; cursor: pointer; }
+.attachment-open:hover .attachment-badge { color: #c8f5d6; }
+.attachment-link { border-style: solid; background: transparent; cursor: pointer; }
+.attachment-link:hover { border-color: var(--green); color: var(--green); }
+.detailed-result-actions { display: flex; gap: 6px; }
+.attachment-viewer { padding: 16px 18px; }
+.viewer-header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.viewer-title { flex: 1 1 260px; min-width: 0; }
+.viewer-title h2 { overflow: hidden; margin: 0 0 3px; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.viewer-position, .viewer-zoom { min-width: 44px; color: #b6c5bc; font-size: 10px; text-align: center; }
+.viewer-search input { width: 220px; min-height: 30px; padding: 5px 8px; border: 1px solid #2a3932; border-radius: 5px; color: #e6ede9; background: #0c1210; font-size: 10px; }
+.viewer-safe-note { margin: 10px 0 0; padding: 7px 10px; border: 1px solid #294b35; border-radius: 6px; color: #b8d9c2; background: #112017; font-size: 10px; }
+.viewer-layout { display: grid; grid-template-columns: minmax(180px, 230px) minmax(0, 1fr) minmax(220px, 300px); gap: 12px; margin-top: 12px; }
+.viewer-tree, .viewer-sheet { padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: #0e1412; }
+.viewer-tree h3 { margin-bottom: 9px; }
+.viewer-tree-list { display: grid; gap: 5px; margin-bottom: 10px; }
+.viewer-tree-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 7px; padding: 7px; border: 1px solid #26362d; border-radius: 5px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
+.viewer-tree-item:hover, .viewer-tree-item.selected { border-color: #4b755c; background: #132019; }
+.viewer-tree-item.warning { border-color: #6b5a2c; }
+.viewer-tree-item.warning .viewer-kind { color: #06210f; background: #f2b544; }
+.viewer-kind { grid-row: span 2; align-self: start; padding: 2px 4px; border-radius: 3px; color: #07130b; background: #7ce0a4; font-size: 8px; font-weight: 700; }
+.viewer-tree-name { overflow: hidden; color: #dbe7df; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-tree-item small { color: var(--muted); font-size: 9px; }
+.viewer-preview { min-height: 420px; max-height: 76vh; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #0b100e; }
+.viewer-message { display: grid; min-height: 200px; place-items: center; padding: 20px; color: var(--muted); font-size: 11px; text-align: center; }
+.viewer-message.error { color: var(--red); }
+.viewer-message.warning { border: 1px solid #6b5a2c; border-radius: 6px; color: #f2d58a; background: #1d1a10; }
+.viewer-text-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.viewer-text { margin: 0; color: #d5dfd9; font-family: Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.viewer-text .line-number { display: inline-block; width: 3.6em; margin-right: 10px; color: #4f6157; user-select: none; }
+.viewer-text mark, .viewer-table mark { color: #11180f; background: #b9ed8a; }
+.viewer-table-wrapper { overflow: auto; }
+.viewer-table { border-collapse: collapse; color: #d5dfd9; font-size: 11px; }
+.viewer-table th, .viewer-table td { padding: 4px 7px; border: 1px solid #24312c; text-align: left; vertical-align: top; white-space: nowrap; }
+.viewer-table th { color: #9fc4ab; background: #111a15; font-weight: 600; }
+.viewer-image { display: flex; justify-content: center; }
+.viewer-image img { max-width: none; height: auto; image-rendering: auto; background: repeating-conic-gradient(#1a221e 0% 25%, #111714 0% 50%) 50% / 16px 16px; }
+.viewer-pager { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; color: #b6c5bc; font-size: 10px; }
+.viewer-sheet { overflow-wrap: anywhere; }
+.viewer-sheet-section + .viewer-sheet-section { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.viewer-sheet-section h4 { margin: 0 0 7px; color: #93aa9b; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+.viewer-sheet-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px; margin: 4px 0; font-size: 10px; }
+.viewer-sheet-row span { color: var(--muted); }
+.viewer-sheet-row strong { color: #d5dfd9; font-weight: 500; }
+.viewer-sheet-row.mono strong { font-family: Consolas, monospace; font-size: 9px; }
+.viewer-sheet-row.ok strong { color: #9fd8b1; }
+.viewer-sheet-row.error strong { color: #f2b544; }
+.viewer-warning { margin: 5px 0; padding: 6px 8px; border: 1px solid #6b5a2c; border-radius: 5px; color: #f2d58a; background: #1d1a10; font-size: 10px; line-height: 1.5; }
+.viewer-duplicate { display: block; width: 100%; margin: 4px 0; padding: 6px 7px; border: 1px solid #26362d; border-radius: 5px; color: #c9d6ce; background: transparent; font-size: 10px; text-align: left; cursor: pointer; }
+.viewer-duplicate:hover { border-color: #4b755c; }
+.viewer-sheet-note { margin-top: 12px; }
+@media (max-width: 1100px) {
+  .viewer-layout { grid-template-columns: minmax(170px, 210px) minmax(0, 1fr); }
+  .viewer-sheet { grid-column: 1 / -1; }
+}
+@media (max-width: 720px) {
+  .viewer-layout { grid-template-columns: 1fr; }
+  .viewer-search input { width: 100%; }
+  .viewer-tools { width: 100%; }
+}
+
 /* Welcome screen with the tilted circuit-board background */
 .welcome {
   position: relative; min-height: 100vh; overflow: hidden; color: #dce7e0; background: #050807;

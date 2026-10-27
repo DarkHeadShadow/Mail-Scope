@@ -111,7 +111,8 @@ Forrás lehet:
      „Csak melléklettel” kapcsológomb (`aria-pressed`), amely ÉS kapcsolattal az egész
      lekérdezésre vonatkozik, VAGY csoportok mellett is; a mentett keresés és minden export
      (CSV, EML ZIP, PDF) megőrzi. A CSV „Mellékletek száma” és „Mellékletek neve” oszlopot kap.
-     A gyanús mellékletek színjelzése a melléklet-nézegetővel együtt készül el
+     A gyanús mellékleteknél (futtatható név, illetve a nézegetőben már elemzett, álcázott
+     tartalom) az ikon figyelmeztető színű, a `title` megnevezi a gyanús fájlt
      (`docs/feladatok/kereses-mellekletjelzes.md`).
    - Mentett keresések, címkézés.
    - Export CSV, EML ZIP + SHA-256, PDF jelentés.
@@ -129,6 +130,22 @@ Forrás lehet:
      ugyanez a fájl más levelekben, dokumentum-metaadatok, jelzések (rejtett lapok, makró,
      PDF-JavaScript, GPS);
    - a mellékletek szövege ügyenként kapcsolhatóan kereshető.
+
+   Szakaszok:
+   1. [x] Alap: saját címen (`#/melleklet/<levél>/<melléklet>`) nyíló nézegető mellékletfával,
+      előnézettel és adatlappal (valódi típus a tartalomból, eltérés és futtatható fájl jelzése,
+      SHA-256, hely, „ugyanez a fájl máshol” a már elemzett mellékletek alapján), elkülönített
+      feldolgozó folyamat 30 s időkorláttal és memóriakorláttal, gyorsítótár az ügy
+      `.mailscope\cache\attachments\<sha256>\` mappájában; szöveg (kódolásfelismeréssel,
+      HTML tisztított nézettel), CSV-tábla és kép (PNG-be újrakódolva, EXIF, GPS) előnézet;
+      mentés `.sha256`-tal és eredetleírással, „Összes mentése” ZIP + `MANIFEST.txt`;
+      billentyűk (`Esc`, `←`/`→`, `Ctrl+F`, `+`/`−`); megnyitás az olvasópanelből, a
+      beszélgetés-buborékokból és a keresési találatokból.
+   2. [ ] PDF, DOCX, XLSX/XLS, homokozott HTML-előnézet (`frame-src 'self'`).
+   3. [ ] Archívumok (ZIP, 7z, RAR) és csatolt levelek (EML, MSG) beágyazott fával,
+      ZIP-bomba-védelem, jelszó.
+   4. [ ] LibreOffice „Pontos nézet”.
+   5. [ ] Melléklet-szöveg a keresésben (`attachments_fts`), ügyenként kapcsolható.
 
 ## Mérföldkövek
 1. [x] Forrásolvasók: MBOX (mappák, Thunderbird, Apple Mail, Gmail Takeout) és PST/OST (libpff),

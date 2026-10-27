@@ -19,6 +19,7 @@ postafiókból származnak.
 7. [03 · Beszélgetésnézet](#7-03--beszélgetésnézet)
 8. [04 · Részletes keresés](#8-04--részletes-keresés)
 9. [05 · Személyek](#9-05--személyek)
+9a. [Melléklet-nézegető](#9a-melléklet-nézegető)
 10. [Keresési szintaxis](#10-keresési-szintaxis)
 11. [Exportok és a forenzikus jegyzékek](#11-exportok-és-a-forenzikus-jegyzékek)
 12. [Forrásintegritás: hash-ellenőrzés](#12-forrásintegritás-hash-ellenőrzés)
@@ -366,6 +367,86 @@ változtat rajta. Ha egy személy minden címe máshová kerül, a személy megs
 
 Egy e-mail-cím egyszerre csak egy személyhez tartozhat. A személyhez rendelés a forrásleveleket
 nem módosítja.
+
+## 9a. Melléklet-nézegető
+
+A mellékleteket a programon belül, biztonságosan nézheti meg. A mellékletből **semmi nem fut**
+(nincs makró, szkript, külső hivatkozás vagy távoli kép), nem nyílik meg külső programban, és a
+nyers fájl nem kerül a böngészőbe.
+
+### Megnyitás
+
+- az **olvasópanel** MELLÉKLETEK szakaszában a melléklet nevére kattintva;
+- a **Beszélgetésnézet** buborékjain a gemkapocsra kattintva;
+- a **Részletes keresés** találatainál a **Mellékletek** gombbal.
+
+A nézegetőnek saját címe van (`#/melleklet/<levél>/<melléklet>`), így a Vissza gomb és a frissítés
+is működik.
+
+### Felépítés
+
+- **Fejléc:** vissza a levélhez, a levél tárgya, feladója, címzettje és dátuma, a melléklet
+  sorszáma („3 / 7”), keresés a dokumentumban, nagyítás, **Mentés…**.
+- **Bal oldalt:** a levél mellékletei; a gyanús mellékletek sárga jelzést kapnak.
+  Alul **Összes mentése (ZIP + jegyzék)**.
+- **Középen:** az előnézet.
+- **Jobb oldalt:** az elemzői adatlap.
+
+### Előnézetek (1. szakasz)
+
+| Típus | Megjelenítés |
+| --- | --- |
+| TXT, LOG, XML, JSON, EML-forrás | szöveg sorszámokkal, kódolásfelismeréssel (pl. Windows-1250), keresés kiemeléssel |
+| HTML | tisztított, látható szöveg; a **Forrás** gombbal a HTML-forrás |
+| CSV | táblázat elválasztó-felismeréssel, 2000 soros oldalakkal |
+| Képek (JPG, PNG, GIF, BMP, WEBP, TIFF) | a kép PNG-be újrakódolva, nagyítással; többoldalas TIFF-nél oldalléptetés; EXIF-adatok, a GPS-koordináta szövegként |
+| Futtatható fájl (EXE, DLL, MSI, BAT, PS1, JS, VBS, LNK…) | előnézet nincs, csak adatlap és mentés |
+
+A PDF, a Word és az Excel beépített nézete, a tömörített fájlok és a csatolt levelek kibontása,
+valamint a LibreOffice-os „Pontos nézet” a következő szakaszokban készül el. Addig ezeknél az
+adatlap és a mentés érhető el.
+
+Legfeljebb 200 MB-os mellékletnél van előnézet; a szövegnézet az első 5 MB-ot mutatja.
+
+### Elemzői adatlap
+
+- **Fájl:** név, méret, megadott típus, a **tartalom alapján felismert valódi típus** (egyezik /
+  ELTÉR), SHA-256, hely a forrásban (forrásfájl › mappa › levél › melléklet).
+- **Képadatok:** méret, EXIF-adatok, GPS-koordináta.
+- **Elemzői jelzések:** például futtatható fájl, kettős kiterjesztés (`fizetes_reszletek.pdf.exe`),
+  a névtől vagy a megadott típustól eltérő tartalom (PDF-nek nevezett ZIP, PDF-nek álcázott
+  program), GPS-helyadat.
+- **Ugyanez a fájl máshol:** más levelek ugyanilyen SHA-256-ú mellékletei. A program a már
+  megnyitott mellékletek hash-ét ismeri; a lista a mellékletek nézegetésével bővül.
+
+Ha egy melléklet gyanús, a keresési találatok, az Archívum és a Beszélgetésnézet gemkapcsa is
+sárga lesz, a fölé álló szöveg pedig megnevezi a gyanús fájlt. A futtatható nevű mellékleteket
+a program azonnal jelzi; a tartalom szerinti álcázást a melléklet első megnyitása után.
+
+### Biztonság
+
+- A mellékletek elemzése **külön folyamatban** fut, 30 másodperces időkorláttal és
+  memóriakorláttal. Ha egy sérült vagy rosszindulatú fájl miatt az elemzés összeomlik vagy
+  elakad, a program magyar hibaüzenetet ad, és zavartalanul működik tovább.
+- Az elkészült előnézetek az ügy `.mailscope\cache\attachments\<SHA-256>\` mappájába kerülnek;
+  máshova a program nem ír.
+
+### Mentés
+
+- **Mentés…:** natív mentési ablak, megtisztított fájlnévvel. A fájl mellé a program létrehoz egy
+  `<fájl>.sha256` és egy `<fájl>.eredet.txt` fájlt (forrás, forrás SHA-256, levél, hely, típusok),
+  és bejegyzést ír az ügynaplóba.
+- **Összes mentése:** ZIP a levél minden mellékletével és egy `MANIFEST.txt` jegyzékkel
+  (név, SHA-256, méret, valódi típus, hely).
+
+### Billentyűk
+
+| Billentyű | Hatás |
+| --- | --- |
+| `Esc` | vissza oda, ahonnan a nézegetőt megnyitotta |
+| `←` / `→` | előző / következő melléklet |
+| `Ctrl+F` | keresés a dokumentumban |
+| `+` / `−` | nagyítás / kicsinyítés |
 
 ## 10. Keresési szintaxis
 

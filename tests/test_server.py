@@ -370,6 +370,110 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(response.status, status)
         self.assertIn("logikai érték", body["error"])
 
+    def test_attachment_viewer_backend(self) -> None:
+        """List, describe, preview, save and save-all attachments from the source."""
+        from PIL import Image
+
+        png = BytesIO()
+        Image.new("RGB", (6, 4), (30, 160, 90)).save(png, format="PNG")
+        files = (
+            ("abra.png", "image", "png", png.getvalue()),
+            ("jegyzet.txt", "text", "plain", "Árvíztűrő tükörfúrógép.\n".encode("cp1250")),
+            ("tabla.csv", "text", "csv", "név;összeg\nTeszt Anna;100\n".encode("utf-8")),
+            ("fizetes_reszletek.pdf", "application", "pdf", b"MZ\x90\x00" + b"\x00" * 64),
+        )
+
+        def mail(message_id: str, subject: str, attachments: tuple) -> bytes:
+            message = EmailMessage()
+            message["From"] = "Teszt Antal <antal@pelda.hu>"
+            message["To"] = "Teszt Anna <anna@pelda.hu>"
+            message["Subject"] = subject
+            message["Date"] = "Sat, 1 Jan 2022 00:00:00 +0000"
+            message["Message-ID"] = message_id
+            message.set_content("Mellékletek.")
+            for name, maintype, subtype, data in attachments:
+                message.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+            return b"From sender@example.test Sat Jan  1 00:00:00 2022\n" + message.as_bytes(policy=policy.SMTP) + b"\n"
+
+        self.source_path.write_bytes(
+            mail("<att-a@example.test>", "Négy melléklet", files)
+            + mail("<att-b@example.test>", "Továbbítva", files[:1])
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        rows = {
+            row["subject"]: row
+            for row in self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=True,
+                deleted_only=False, item_type=None, include_duplicates=False, limit=10, offset=0,
+            )
+        }
+        first = int(rows["Négy melléklet"]["message_id"])
+        second = int(rows["Továbbítva"]["message_id"])
+        # The executable name is flagged before any analysis only by its real
+        # content; the name itself looks harmless here.
+        self.assertEqual(rows["Négy melléklet"]["suspicious_attachments"], [])
+
+        listing = self.application.message_attachments(first)
+        self.assertEqual([a["name"] for a in listing["attachments"]], [f[0] for f in files])
+        views = {a["name"]: (a["real_kind"], a["view"], bool(a["warnings"])) for a in listing["attachments"]}
+        self.assertEqual(views["abra.png"], ("png", "image", False))
+        self.assertEqual(views["jegyzet.txt"], ("text", "text", False))
+        self.assertEqual(views["tabla.csv"], ("text", "table", False))
+        self.assertEqual(views["fizetes_reszletek.pdf"], ("exe", "none", True))
+        rows_after = {
+            row["subject"]: row
+            for row in self.application.archive(
+                query="", source_id=None, folder_id=None, has_attachments=True,
+                deleted_only=False, item_type=None, include_duplicates=False, limit=10, offset=0,
+            )
+        }
+        self.assertEqual(rows_after["Négy melléklet"]["suspicious_attachments"], ["fizetes_reszletek.pdf"])
+
+        self.application.message_attachments(second)
+        info = self.application.attachment_info(first, "0")
+        self.assertEqual(info["sha256"], hashlib.sha256(files[0][3]).hexdigest())
+        self.assertEqual([item["message_id"] for item in info["same_elsewhere"]], [second])
+        self.assertIn("1. melléklet", info["location"])
+
+        text = self.application.attachment_preview(first, "1", 0)
+        self.assertEqual(text["encoding"], "Windows-1250")
+        self.assertIn("Árvíztűrő", text["text"])
+        table = self.application.attachment_preview(first, "2", 0)
+        self.assertEqual(table["rows"], [["név", "összeg"], ["Teszt Anna", "100"]])
+        image = self.application.attachment_preview(first, "0", 0)
+        self.assertEqual((image["width"], image["height"]), (6, 4))
+        self.assertTrue(self.application.attachment_image(first, "0", 0).startswith(b"\x89PNG"))
+        none = self.application.attachment_preview(first, "3", 0)
+        self.assertEqual(none["kind"], "none")
+        self.assertIn("Futtatható", none["reason"])
+        cache = self.case_directory / ".mailscope" / "cache" / "attachments" / info["sha256"]
+        self.assertTrue(cache.is_dir())
+
+        target = self.root / "mentes" / "kimentett.txt"
+        target.parent.mkdir()
+        with patch("server.app._save_path_dialog", return_value=str(target)):
+            saved = self.application.save_attachment(first, "1")
+        self.assertEqual(saved["saved_path"], str(target))
+        self.assertEqual(target.read_bytes(), files[1][3])
+        self.assertEqual(
+            (self.root / "mentes" / "kimentett.txt.sha256").read_text(encoding="utf-8"),
+            f"{hashlib.sha256(files[1][3]).hexdigest()}  kimentett.txt\n",
+        )
+        self.assertIn("Forrás SHA-256", (self.root / "mentes" / "kimentett.txt.eredet.txt").read_text(encoding="utf-8"))
+        with patch("server.app._save_path_dialog", return_value=""):
+            self.assertEqual(self.application.save_attachment(first, "1"), {"cancelled": True})
+
+        bundle = self.root / "mentes" / "osszes.zip"
+        with patch("server.app._save_path_dialog", return_value=str(bundle)):
+            self.application.save_all_attachments(first)
+        with zipfile.ZipFile(bundle) as archive:
+            self.assertEqual(sorted(archive.namelist()), sorted([f[0] for f in files] + ["MANIFEST.txt"]))
+            manifest = archive.read("MANIFEST.txt").decode("utf-8")
+            self.assertIn("Windows-program (futtatható)", manifest)
+            self.assertEqual(archive.read("abra.png"), files[0][3])
+        self.assertEqual(self.source_path.read_bytes(), self.source_bytes)
+
     def test_full_reverification_http_route(self) -> None:
         """Start a full check through the same-origin POST route."""
         source_id = self._index_fixture_source()
@@ -474,6 +578,15 @@ class ServerTests(unittest.TestCase):
 
         open_browser.assert_called_once_with("http://127.0.0.1:43210", new=2)
         http_server.server_close.assert_called_once_with()
+
+        with (
+            patch("sys.argv", ["mailscope", "--port", "0", "--no-browser"]),
+            patch("server.__main__.create_server", return_value=http_server),
+            patch("server.__main__.configure_logging", return_value=None),
+            patch("server.__main__.webbrowser.open", return_value=True) as no_browser,
+        ):
+            run_server_main()
+        no_browser.assert_not_called()
 
     def test_conversation_modes_dates_threads_and_activity(self) -> None:
         """Apply person modes, CC filtering, time range, thread, and text query."""

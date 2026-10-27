@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Generator
 
+from attachments.detect import is_suspicious_name
 from sources.models import MessageLocator, MessageMetadata
 
 
@@ -146,6 +147,19 @@ CREATE TABLE IF NOT EXISTS saved_searches (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS attachment_files (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    position TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    real_kind TEXT NOT NULL,
+    suspicious INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(message_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_attachment_files_sha256 ON attachment_files(sha256);
+
 CREATE TABLE IF NOT EXISTS ignored_addresses (
     address TEXT PRIMARY KEY
 );
@@ -220,6 +234,9 @@ class IndexDatabase:
         connection.execute("PRAGMA synchronous = NORMAL")
         connection.create_function(
             "casefold", 1, _sqlite_casefold, deterministic=True
+        )
+        connection.create_function(
+            "suspicious_name", 1, _sqlite_suspicious_name, deterministic=True
         )
         if write:
             try:
@@ -1164,6 +1181,13 @@ class IndexDatabase:
                             WHERE attachments.message_id = messages.id
                             ORDER BY filename LIMIT 5
                        )) AS attachment_names,
+                       (SELECT group_concat(filename, char(31)) FROM (
+                            SELECT filename FROM attachments
+                            WHERE attachments.message_id = messages.id AND suspicious_name(filename)
+                            UNION
+                            SELECT filename FROM attachment_files
+                            WHERE attachment_files.message_id = messages.id AND suspicious = 1
+                       )) AS suspicious_attachments,
                        (SELECT count(*) FROM occurrences AS copies
                         WHERE copies.message_id = messages.id) AS copy_count,
                        (SELECT count(*) FROM occurrences AS earlier
@@ -1419,6 +1443,13 @@ class IndexDatabase:
                                 WHERE attachments.message_id = messages.id
                                 ORDER BY filename LIMIT 5
                            )) AS attachment_names,
+                       (SELECT group_concat(filename, char(31)) FROM (
+                            SELECT filename FROM attachments
+                            WHERE attachments.message_id = messages.id AND suspicious_name(filename)
+                            UNION
+                            SELECT filename FROM attachment_files
+                            WHERE attachment_files.message_id = messages.id AND suspicious = 1
+                       )) AS suspicious_attachments,
                            (
                                SELECT count(*) FROM occurrences AS copies
                                WHERE copies.message_id = messages.id
@@ -1681,6 +1712,13 @@ class IndexDatabase:
                                 WHERE attachments.message_id = messages.id
                                 ORDER BY filename LIMIT 5
                            )) AS attachment_names,
+                       (SELECT group_concat(filename, char(31)) FROM (
+                            SELECT filename FROM attachments
+                            WHERE attachments.message_id = messages.id AND suspicious_name(filename)
+                            UNION
+                            SELECT filename FROM attachment_files
+                            WHERE attachment_files.message_id = messages.id AND suspicious = 1
+                       )) AS suspicious_attachments,
                            messages.content_hash
                     FROM messages
                     LEFT JOIN messages_fts ON messages_fts.rowid = messages.id
@@ -2154,6 +2192,56 @@ class IndexDatabase:
                 )
             )
 
+    def record_attachment_files(self, message_id: int, entries: list[dict[str, Any]]) -> None:
+        """Remember the hash, real type and risk of each analysed attachment."""
+        with self.connection(write=True, timeout=USER_WRITE_TIMEOUT_SECONDS) as connection:
+            connection.executemany(
+                """
+                INSERT INTO attachment_files(
+                    message_id, position, filename, content_type, size, sha256, real_kind, suspicious
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id, position) DO UPDATE SET
+                    filename = excluded.filename, content_type = excluded.content_type,
+                    size = excluded.size, sha256 = excluded.sha256,
+                    real_kind = excluded.real_kind, suspicious = excluded.suspicious
+                """,
+                [
+                    (
+                        message_id,
+                        entry["path"],
+                        entry["name"],
+                        entry["declared_type"],
+                        entry["size"],
+                        entry["sha256"],
+                        entry["real_kind"],
+                        int(bool(entry["warnings"])),
+                    )
+                    for entry in entries
+                ],
+            )
+
+    def attachments_with_hash(self, sha256: str, exclude_message_id: int) -> list[sqlite3.Row]:
+        """List other analysed attachments with the same SHA-256, with their messages."""
+        with self.connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT attachment_files.message_id, attachment_files.position,
+                           attachment_files.filename, messages.subject,
+                           messages.sent_timestamp,
+                           (SELECT group_concat(address, ', ') FROM participants
+                            WHERE participants.message_id = messages.id
+                              AND participants.role = 'from') AS sender
+                    FROM attachment_files
+                    JOIN messages ON messages.id = attachment_files.message_id
+                    WHERE attachment_files.sha256 = ? AND attachment_files.message_id != ?
+                    ORDER BY messages.sent_timestamp, attachment_files.message_id
+                    LIMIT 50
+                    """,
+                    (sha256, exclude_message_id),
+                )
+            )
+
     def person_suggestion_rows(self) -> list[sqlite3.Row]:
         """Return observed names and addresses suitable for merge suggestions."""
         with self.connection() as connection:
@@ -2363,6 +2451,11 @@ def _search_date_timestamp(value: str, *, next_day: bool) -> int:
 def _escape_like(value: str) -> str:
     """Escape SQL LIKE metacharacters so user values stay literal substrings."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sqlite_suspicious_name(value: str | None) -> int:
+    """Expose the executable/decoy file-name check to SQL queries."""
+    return int(is_suspicious_name(value or ""))
 
 
 def _sqlite_casefold(value: str | None) -> str:

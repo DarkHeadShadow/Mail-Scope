@@ -425,6 +425,40 @@
             <button id="next-search-page" class="button quiet" type="button" disabled>Következő oldal</button>
           </div>
         </section>
+        <section class="panel attachment-viewer" id="attachment-viewer" data-page="melleklet" aria-labelledby="attachment-viewer-title" hidden>
+          <div class="viewer-header">
+            <button id="viewer-back" class="button quiet" type="button">← Vissza a levélhez</button>
+            <div class="viewer-title">
+              <p class="eyebrow">MELLÉKLET-NÉZEGETŐ</p>
+              <h2 id="attachment-viewer-title" class="page-heading" tabindex="-1">Melléklet</h2>
+              <span id="viewer-message-summary" class="muted"></span>
+            </div>
+            <div class="viewer-tools">
+              <button id="viewer-prev" class="button quiet" type="button" aria-label="Előző melléklet">←</button>
+              <span id="viewer-position" class="viewer-position">0 / 0</span>
+              <button id="viewer-next" class="button quiet" type="button" aria-label="Következő melléklet">→</button>
+              <label class="viewer-search">
+                <span class="visually-hidden">Keresés a dokumentumban</span>
+                <input id="viewer-search" type="search" placeholder="Keresés a dokumentumban (Ctrl+F)">
+              </label>
+              <button id="viewer-zoom-out" class="button quiet" type="button" aria-label="Kicsinyítés">−</button>
+              <span id="viewer-zoom" class="viewer-zoom">100%</span>
+              <button id="viewer-zoom-in" class="button quiet" type="button" aria-label="Nagyítás">+</button>
+              <button id="viewer-save" class="button secondary" type="button">Mentés…</button>
+            </div>
+          </div>
+          <p class="viewer-safe-note">Biztonságos nézet – a fájlból semmi nem fut, és az előnézet semmit nem tölt be az internetről.</p>
+          <div class="viewer-layout">
+            <nav class="viewer-tree" aria-label="A levél mellékletei">
+              <h3>Mellékletek <span id="viewer-count" class="muted"></span></h3>
+              <div id="viewer-tree-list" class="viewer-tree-list"></div>
+              <button id="viewer-save-all" class="button quiet" type="button">Összes mentése (ZIP + jegyzék)</button>
+            </nav>
+            <div id="viewer-preview" class="viewer-preview" tabindex="-1"></div>
+            <aside id="viewer-sheet" class="viewer-sheet" aria-label="Elemzői adatlap"></aside>
+          </div>
+          <p id="viewer-notice" class="notice" role="status" aria-live="polite"></p>
+        </section>
         <section id="search-print-report" class="search-print-report" aria-hidden="true"></section>
         <footer class="page-footer">Mail-Scope · offline levélvizsgáló · Bálint Szabolcs</footer>
       </main>

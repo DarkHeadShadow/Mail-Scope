@@ -43,6 +43,8 @@ from sources.discover import (
 )
 from sources.reader_factory import open_source
 from version import __version__
+from attachments.sandbox import AttachmentProcessingError
+from attachments.service import PreviewCache, describe, image_png, preview as attachment_preview
 
 from .applog import application_log_path, attach_case_log
 
@@ -69,6 +71,27 @@ VERIFICATION_MODES = {"signature", "full"}
 _VERIFICATION_MODE_KEY = "verification_mode"
 _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
+
+
+def _save_path_dialog(default_name: str, description: str) -> str:
+    """Show a native Windows save dialog in front of the browser; empty on cancel."""
+    from tkinter import Tk, filedialog
+
+    root = Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        root.update()
+        root.lift()
+        root.focus_force()
+        return filedialog.asksaveasfilename(
+            parent=root,
+            title="Melléklet mentése",
+            initialfile=default_name,
+            filetypes=((description, "*" + (Path(default_name).suffix or ".*")), ("Minden fájl", "*")),
+        )
+    finally:
+        root.destroy()
 
 
 def _browse_local_path(kind: str, initial_path: str) -> str:
@@ -141,6 +164,7 @@ class MailScopeApplication:
         self._hash_locks: dict[str, threading.Lock] = {}
         self._readers: dict[tuple[str, str], SourceReader] = {}
         self._verifications: dict[int, dict[str, Any]] = {}
+        self._attachment_cache: dict[int, dict[str, Any]] = {}
         self.case_log: Path | None = None
 
     def select_case(self, path: str) -> dict[str, Any]:
@@ -173,6 +197,7 @@ class MailScopeApplication:
             self._verified_sources.clear()
             self._close_readers()
             self._verifications = {}
+            self._attachment_cache = {}
             self.job = None
             self._recent_counts = None
             return self.status()
@@ -872,6 +897,245 @@ class MailScopeApplication:
         export_checks: dict[str, tuple[tuple[int, ...], str]] | None = None,
     ) -> dict[str, Any]:
         """Load a selected message from its original source after hash verification."""
+        opened = self._verified_occurrence(message_id, export_checks=export_checks)
+        database = opened["database"]
+        indexed_message = opened["indexed_message"]
+        occurrences = opened["occurrences"]
+        occurrence = opened["occurrence"]
+        source = opened["source"]
+        locator = opened["locator"]
+        source_path = source.path
+        source_kind = source.kind
+        expected_hash = source.sha256
+        check_mode = opened["check_mode"]
+        with self._lock:
+            if self.database is not database:
+                raise ApiError(HTTPStatus.CONFLICT, "Az ügy a megnyitás közben megváltozott.")
+            try:
+                reader = self._reader(source)
+                raw_message = reader.open_message(locator)
+                body = message_body_text(raw_message)
+                raw_eml = reader.open_message_bytes(locator) if include_raw else None
+            except Exception as error:
+                logger.exception("Unable to open indexed message %s", message_id)
+                raise ApiError(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    f"A levél nem olvasható az eredeti forrásból: {error}",
+                ) from error
+            result: dict[str, Any] = {
+                "message": _row_json(indexed_message),
+                "headers": _message_headers(raw_message),
+                "body": body,
+                "participants": [_row_json(row) for row in database.participant_rows(message_id)],
+                "attachments": [
+                    _row_json(row)
+                    for row in database.attachment_rows_for_message(message_id)
+                ],
+                "labels": database.labels_for_message(message_id),
+                "occurrences": [_row_json(row) for row in occurrences],
+                "opened_from_occurrence": int(occurrence["id"]),
+            }
+            if include_raw:
+                source_row = database.source_by_id(int(occurrence["source_id"]))
+                result["raw_eml"] = raw_eml
+                result["raw_source"] = {
+                    "reconstructed": source_kind in {"pst", "ost"},
+                    "path": str(source_path),
+                    "sha256": expected_hash,
+                    "location": _locator_text(
+                        locator,
+                        exported_length=len(raw_eml) if source_kind == "mbox" else None,
+                    ),
+                    "check": check_mode,
+                    "last_full_check": (
+                        None if source_row is None else source_row["verified_at"]
+                    ),
+                }
+            return result
+
+    def _load_attachments(self, message_id: int) -> dict[str, Any]:
+        """Verify the source, then read and describe a message's attachments in memory."""
+        opened = self._verified_occurrence(message_id)
+        database = opened["database"]
+        with self._lock:
+            if self.database is not database:
+                raise ApiError(HTTPStatus.CONFLICT, "Az ügy a megnyitás közben megváltozott.")
+            cached = self._attachment_cache.get(message_id)
+            if cached is not None:
+                return cached
+            try:
+                attachments = self._reader(opened["source"]).open_attachments(opened["locator"])
+            except Exception as error:
+                logger.exception("Unable to read attachments of message %s", message_id)
+                raise ApiError(
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                    f"A mellékletek nem olvashatók az eredeti forrásból: {error}",
+                ) from error
+            entries = describe(attachments)
+            participants = database.participant_rows(message_id)
+            message = opened["indexed_message"]
+            folder = str(opened["occurrence"]["folder_path"] or opened["occurrence"]["folder_name"] or "—")
+            loaded = {
+                "database": database,
+                "entries": entries,
+                "data": [attachment.data for attachment in attachments],
+                "source": opened["source"],
+                "location": f"{opened['source'].path.name} › {folder} › levél #{message_id}",
+                "summary": {
+                    "message_id": message_id,
+                    "subject": message["subject"],
+                    "sent_timestamp": message["sent_timestamp"],
+                    "internet_message_id": message["internet_message_id"],
+                    "from": [row["address"] for row in participants if row["role"] == "from"],
+                    "to": [row["address"] for row in participants if row["role"] == "to"],
+                },
+            }
+            # Keep only the most recently viewed messages' attachments in memory.
+            while len(self._attachment_cache) >= 3:
+                self._attachment_cache.pop(next(iter(self._attachment_cache)))
+            self._attachment_cache[message_id] = loaded
+        try:
+            database.record_attachment_files(message_id, entries)
+        except DatabaseBusyError:
+            logger.warning("Attachment hashes not recorded (database busy): message %s", message_id)
+        return loaded
+
+    def _attachment(self, message_id: int, path: str) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+        """Return the loaded message context, one attachment entry, and its bytes."""
+        if not re.fullmatch(r"\d{1,4}", path):
+            raise ApiError(HTTPStatus.NOT_FOUND, "Érvénytelen mellékletazonosító.")
+        loaded = self._load_attachments(message_id)
+        index = int(path)
+        if index >= len(loaded["entries"]):
+            raise ApiError(HTTPStatus.NOT_FOUND, "A melléklet nem található.")
+        return loaded, loaded["entries"][index], loaded["data"][index]
+
+    def message_attachments(self, message_id: int) -> dict[str, Any]:
+        """List a message's attachments with their real types and warnings."""
+        loaded = self._load_attachments(message_id)
+        return {"message": loaded["summary"], "attachments": loaded["entries"]}
+
+    def attachment_info(self, message_id: int, path: str) -> dict[str, Any]:
+        """Return the analyst data sheet of one attachment."""
+        loaded, entry, _ = self._attachment(message_id, path)
+        elsewhere = [
+            {
+                "message_id": int(row["message_id"]),
+                "position": str(row["position"]),
+                "filename": str(row["filename"]),
+                "subject": row["subject"],
+                "sender": row["sender"],
+                "sent_timestamp": row["sent_timestamp"],
+            }
+            for row in loaded["database"].attachments_with_hash(entry["sha256"], message_id)
+        ]
+        return {
+            **entry,
+            "location": f"{loaded['location']} › {int(path) + 1}. melléklet",
+            "message": loaded["summary"],
+            "same_elsewhere": elsewhere,
+        }
+
+    def attachment_preview(self, message_id: int, path: str, page: int) -> dict[str, Any]:
+        """Render or fetch the cached preview of one attachment in the isolated worker."""
+        loaded, entry, data = self._attachment(message_id, path)
+        cache = PreviewCache(self._require_case_directory())
+        try:
+            result = attachment_preview(cache, entry, data, page)
+        except AttachmentProcessingError as error:
+            logger.warning("Attachment preview failed: message %s/%s: %s", message_id, path, error)
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+        if result.get("kind") == "image":
+            result["image_url"] = (
+                f"/api/attachments/{message_id}/{path}/image?page={result['page']}"
+            )
+        return result
+
+    def attachment_image(self, message_id: int, path: str, page: int) -> bytes:
+        """Return the re-encoded PNG of an image attachment page."""
+        _, entry, data = self._attachment(message_id, path)
+        try:
+            return image_png(PreviewCache(self._require_case_directory()), entry, data, page)
+        except AttachmentProcessingError as error:
+            raise ApiError(HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
+
+    def save_attachment(self, message_id: int, path: str) -> dict[str, Any]:
+        """Save one attachment with a .sha256 file and a provenance note, then log it."""
+        loaded, entry, data = self._attachment(message_id, path)
+        target = _save_path_dialog(_safe_filename(entry["name"]), "Melléklet")
+        if not target:
+            return {"cancelled": True}
+        target_path = Path(target)
+        target_path.write_bytes(data)
+        target_path.with_name(target_path.name + ".sha256").write_text(
+            f"{entry['sha256']}  {target_path.name}\n", encoding="utf-8"
+        )
+        target_path.with_name(target_path.name + ".eredet.txt").write_text(
+            "\n".join(
+                (
+                    f"Mail-Scope {__version__} – melléklet mentése ({datetime.now(timezone.utc).isoformat(timespec='seconds')})",
+                    f"Melléklet: {entry['name']}",
+                    f"SHA-256: {entry['sha256']}",
+                    f"Méret: {entry['size']} bájt",
+                    f"Megadott típus: {entry['declared_type'] or '—'}",
+                    f"Valódi típus: {entry['real_label']}",
+                    f"Hely: {loaded['location']} › {int(path) + 1}. melléklet",
+                    f"Forrásfájl: {loaded['source'].path}",
+                    f"Forrás SHA-256: {loaded['source'].sha256}",
+                    f"Levél: {loaded['summary']['subject'] or '(nincs tárgy)'}",
+                    f"Message-ID: {loaded['summary']['internet_message_id'] or '—'}",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        logger.info(
+            "Attachment saved: message %s/%s %s sha256=%s -> %s",
+            message_id, path, entry["name"], entry["sha256"], target_path,
+        )
+        return {"saved_path": str(target_path)}
+
+    def save_all_attachments(self, message_id: int) -> dict[str, Any]:
+        """Save every attachment of a message into one ZIP with a MANIFEST.txt."""
+        loaded = self._load_attachments(message_id)
+        if not loaded["entries"]:
+            raise ApiError(HTTPStatus.NOT_FOUND, "A levélnek nincs melléklete.")
+        subject = _safe_filename(str(loaded["summary"]["subject"] or "level"))[:60] or "level"
+        target = _save_path_dialog(f"{subject}_mellekletek.zip", "ZIP-archívum")
+        if not target:
+            return {"cancelled": True}
+        manifest = ["név\tSHA-256\tméret\tvalódi típus\thely"]
+        used: set[str] = set()
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for index, (entry, data) in enumerate(zip(loaded["entries"], loaded["data"])):
+                name = _safe_filename(entry["name"]) or f"melleklet-{index + 1}"
+                if name.casefold() in used:
+                    name = f"{index + 1:02d}_{name}"
+                used.add(name.casefold())
+                archive.writestr(name, data)
+                manifest.append(
+                    "\t".join(
+                        (name, entry["sha256"], str(entry["size"]), entry["real_label"],
+                         f"{loaded['location']} › {index + 1}. melléklet")
+                    )
+                )
+            archive.writestr("MANIFEST.txt", ("\n".join(manifest) + "\n").encode("utf-8"))
+        logger.info("All attachments of message %s saved -> %s", message_id, target)
+        return {"saved_path": target}
+
+    def _require_case_directory(self) -> Path:
+        """Return the open case folder for case-local caches."""
+        if self.case_directory is None:
+            raise ApiError(HTTPStatus.CONFLICT, "Előbb nyisson meg vagy hozzon létre egy ügyet.")
+        return self.case_directory
+
+    def _verified_occurrence(
+        self,
+        message_id: int,
+        *,
+        export_checks: dict[str, tuple[tuple[int, ...], str]] | None = None,
+    ) -> dict[str, Any]:
+        """Find a message's first source copy and verify the source before reading it."""
         with self._lock:
             database = self._require_case()
             indexed_message = database.message_details(message_id)
@@ -915,17 +1179,20 @@ class MailScopeApplication:
                 HTTPStatus.CONFLICT,
                 "A forrásfájl az indexelés óta megváltozott; a forenzikus megnyitás leállt.",
             )
-        with self._lock:
-            if self.database is not database:
-                raise ApiError(HTTPStatus.CONFLICT, "Az ügy a megnyitás közben megváltozott.")
-            source = DiscoveredSource(
+        return {
+            "database": database,
+            "indexed_message": indexed_message,
+            "occurrences": occurrences,
+            "occurrence": occurrence,
+            "check_mode": check_mode,
+            "source": DiscoveredSource(
                 path=source_path,
-                kind=str(occurrence["source_kind"]),
+                kind=source_kind,
                 size=int(occurrence["source_size"]),
                 sha256=expected_hash,
                 folder=str(occurrence["folder_path"] or ""),
-            )
-            locator = MessageLocator(
+            ),
+            "locator": MessageLocator(
                 offset=int(occurrence["locator_offset"]),
                 length=int(occurrence["locator_length"]),
                 folder_path=str(occurrence["locator_folder_path"] or "") or None,
@@ -935,48 +1202,8 @@ class MailScopeApplication:
                     else int(occurrence["locator_item_index"])
                 ),
                 item_id=str(occurrence["locator_item_id"] or "") or None,
-            )
-            try:
-                reader = self._reader(source)
-                raw_message = reader.open_message(locator)
-                body = message_body_text(raw_message)
-                raw_eml = reader.open_message_bytes(locator) if include_raw else None
-            except Exception as error:
-                logger.exception("Unable to open indexed message %s", message_id)
-                raise ApiError(
-                    HTTPStatus.UNPROCESSABLE_ENTITY,
-                    f"A levél nem olvasható az eredeti forrásból: {error}",
-                ) from error
-            result: dict[str, Any] = {
-                "message": _row_json(indexed_message),
-                "headers": _message_headers(raw_message),
-                "body": body,
-                "participants": [_row_json(row) for row in database.participant_rows(message_id)],
-                "attachments": [
-                    _row_json(row)
-                    for row in database.attachment_rows_for_message(message_id)
-                ],
-                "labels": database.labels_for_message(message_id),
-                "occurrences": [_row_json(row) for row in occurrences],
-                "opened_from_occurrence": int(occurrence["id"]),
-            }
-            if include_raw:
-                source_row = database.source_by_id(int(occurrence["source_id"]))
-                result["raw_eml"] = raw_eml
-                result["raw_source"] = {
-                    "reconstructed": source_kind in {"pst", "ost"},
-                    "path": str(source_path),
-                    "sha256": expected_hash,
-                    "location": _locator_text(
-                        locator,
-                        exported_length=len(raw_eml) if source_kind == "mbox" else None,
-                    ),
-                    "check": check_mode,
-                    "last_full_check": (
-                        None if source_row is None else source_row["verified_at"]
-                    ),
-                }
-            return result
+            ),
+        }
 
     def _reader(self, source: DiscoveredSource) -> SourceReader:
         """Reuse one reader per source, so PST/OST stores are not reopened per message."""
@@ -1197,6 +1424,28 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(archive)
+            elif match := re.fullmatch(r"/api/messages/(\d+)/attachments", request.path):
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.application.message_attachments(int(match.group(1))),
+                )
+            elif match := re.fullmatch(r"/api/attachments/(\d+)/(\d+)/(info|preview|image)", request.path):
+                message_id, path, action = int(match.group(1)), match.group(2), match.group(3)
+                query = parse_qs(request.query)
+                page = _optional_integer(query, "page") or 0 if action != "info" else 0
+                if action == "info":
+                    self._send_json(HTTPStatus.OK, self.server.application.attachment_info(message_id, path))
+                elif action == "preview":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        self.server.application.attachment_preview(message_id, path, page),
+                    )
+                else:
+                    self._send_bytes(
+                        HTTPStatus.OK,
+                        self.server.application.attachment_image(message_id, path, page),
+                        "image/png",
+                    )
             elif request.path.startswith("/api/messages/"):
                 message_id = _positive_integer(request.path.removeprefix("/api/messages/"))
                 self._send_json(
@@ -1336,6 +1585,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 response = self.server.application.start_index(paths)
             elif path == "/api/index/cancel":
                 response = self.server.application.cancel_index()
+            elif match := re.fullmatch(r"/api/attachments/(\d+)/(\d+)/save", path):
+                response = self.server.application.save_attachment(int(match.group(1)), match.group(2))
+            elif match := re.fullmatch(r"/api/messages/(\d+)/attachments/save-all", path):
+                response = self.server.application.save_all_attachments(int(match.group(1)))
             elif path == "/api/people/auto":
                 response = self.server.application.edit_person("auto", None, payload)
             elif re.fullmatch(r"/api/people/\d+/(rename|merge|addresses|remove-address|split|delete)", path):
@@ -1623,9 +1876,10 @@ def _row_json(row: sqlite3.Row) -> dict[str, Any]:
     exposed as a list of at most five file names.
     """
     result = {key: row[key] for key in row.keys()}
-    if "attachment_names" in result:
-        joined = result["attachment_names"]
-        result["attachment_names"] = joined.split("\x1f") if joined else []
+    for key in ("attachment_names", "suspicious_attachments"):
+        if key in result:
+            joined = result[key]
+            result[key] = joined.split("\x1f") if joined else []
     return result
 
 
@@ -1727,6 +1981,18 @@ def default_recent_cases_file() -> Path:
     """Return the per-user recent-case list under %APPDATA%\\Mail-Scope."""
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
     return Path(base) / "Mail-Scope" / "recent.json"
+
+
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}
+
+
+def _safe_filename(name: str) -> str:
+    """Make an attachment name safe as a Windows file name, keeping its extension."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", Path(name.replace("\\", "/")).name)
+    cleaned = cleaned.strip(" .")[:180]
+    if cleaned.split(".", 1)[0].casefold() in _WINDOWS_RESERVED:
+        cleaned = f"_{cleaned}"
+    return cleaned
 
 
 def _optional_path(path: Path | None) -> str | None:

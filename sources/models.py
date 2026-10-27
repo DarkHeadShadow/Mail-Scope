@@ -34,6 +34,7 @@ class Attachment:
     filename: str
     content_type: str
     data: bytes
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -86,5 +87,7 @@ class SourceReader(Protocol):
     def open_message_bytes(self, locator: MessageLocator) -> bytes: ...
 
     def open_attachment(self, locator: MessageLocator, index: int) -> Attachment: ...
+
+    def open_attachments(self, locator: MessageLocator) -> list[Attachment]: ...
 
     def close(self) -> None: ...

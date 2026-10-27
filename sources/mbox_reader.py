@@ -13,6 +13,7 @@ from typing import Iterator
 
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
 from .content import (
+    message_attachments,
     message_addresses,
     message_body_text,
     message_participant_names,
@@ -134,6 +135,10 @@ class MboxReader:
                     data=part.get_payload(decode=True) or b"",
                 )
         raise IndexError(f"No attachment at index {index}")
+
+    def open_attachments(self, locator: MessageLocator) -> list[Attachment]:
+        """Load all attachments of one message into memory, in indexing order."""
+        return message_attachments(self.open_message(locator))
 
     def _message_ranges(
         self, after_locator: MessageLocator | None = None

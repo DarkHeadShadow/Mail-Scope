@@ -2,7 +2,10 @@
 
 __author__ = "Bálint Szabolcs"
 
+from email import policy
 from email.message import EmailMessage
+
+from .models import Attachment
 from email.utils import getaddresses
 from html.parser import HTMLParser
 
@@ -96,6 +99,34 @@ def message_body_text(message: EmailMessage) -> str:
         if content.strip():
             return content
     return ""
+
+
+def message_attachments(message: EmailMessage) -> list[Attachment]:
+    """Return a parsed message's attachments in indexing order, decoded in memory.
+
+    An attached message (message/rfc822) is returned as its RFC 5322 bytes.
+    """
+    attachments: list[Attachment] = []
+    for index, part in enumerate(
+        part
+        for part in message.walk()
+        if part.get_content_disposition() == "attachment" or part.get_filename()
+    ):
+        filename = part.get_filename() or f"attachment-{index + 1}"
+        try:
+            if part.get_content_type() == "message/rfc822":
+                inner = part.get_payload(0)
+                data = inner.as_bytes(policy=policy.SMTP)
+                if not part.get_filename():
+                    filename = f"{inner.get('Subject') or 'csatolt-level'}.eml"
+            else:
+                data = part.get_payload(decode=True) or b""
+            attachments.append(Attachment(filename, part.get_content_type(), data))
+        except Exception as error:
+            attachments.append(
+                Attachment(filename, part.get_content_type(), b"", error=f"{type(error).__name__}: {error}")
+            )
+    return attachments
 
 
 def html_to_text(content: str) -> str:

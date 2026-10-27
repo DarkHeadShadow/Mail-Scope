@@ -68,9 +68,11 @@ function attachmentBadge(message) {
   const names = Array.isArray(message.attachment_names) ? message.attachment_names : [];
   const listed = names.slice(0, 5).join(", ");
   const rest = count - Math.min(names.length, 5);
-  const description = `${count} melléklet: ${listed}${rest > 0 ? ` … és még ${rest}` : ""}`;
+  const suspicious = Array.isArray(message.suspicious_attachments) ? message.suspicious_attachments : [];
+  const description = `${count} melléklet: ${listed}${rest > 0 ? ` … és még ${rest}` : ""}`
+    + (suspicious.length ? ` · GYANÚS: ${suspicious.join(", ")}` : "");
   const badge = document.createElement("span");
-  badge.className = "attachment-badge";
+  badge.className = `attachment-badge${suspicious.length ? " suspicious" : ""}`;
   badge.setAttribute("role", "img");
   badge.setAttribute("aria-label", description);
   badge.title = description;
@@ -95,6 +97,7 @@ const ROUTES = {
   beszelgetes: { panel: "conversation-panel", title: "Beszélgetésnézet" },
   kereses: { panel: "detailed-search-panel", title: "Részletes keresés" },
   szemelyek: { panel: "people-panel", title: "Személyek" },
+  melleklet: { panel: "attachment-viewer", title: "Melléklet-nézegető" },
 };
 const ROUTE_ORDER = Object.keys(ROUTES);
 
@@ -102,8 +105,13 @@ const ROUTE_ORDER = Object.keys(ROUTES);
  * Read the page name from a "#/name" hash, falling back to the case page.
  */
 function currentRoute() {
+  const viewer = window.location.hash.match(/^#\/melleklet\/(\d+)\/(\d+)$/);
+  if (viewer) {
+    state.viewerTarget = { messageId: Number(viewer[1]), path: viewer[2] };
+    return "melleklet";
+  }
   const match = window.location.hash.match(/^#\/([a-z]+)$/);
-  return match && ROUTES[match[1]] ? match[1] : "ugy";
+  return match && ROUTES[match[1]] && match[1] !== "melleklet" ? match[1] : "ugy";
 }
 
 /**
@@ -124,8 +132,9 @@ function navigate(route) {
 function showRoute() {
   let route = currentRoute();
   if (!state.caseOpen && route !== "ugy") route = "ugy";
-  if (window.location.hash !== `#/${route}`) {
-    window.history.replaceState(null, "", `#/${route}`);
+  const expectedHash = route === "melleklet" ? window.location.hash : `#/${route}`;
+  if (window.location.hash !== expectedHash) {
+    window.history.replaceState(null, "", expectedHash);
   }
   ROUTE_ORDER.forEach((name) => {
     element(ROUTES[name].panel).hidden = name !== route;
@@ -143,6 +152,8 @@ function showRoute() {
   document.title = `${ROUTES[route].title} — Mail-Scope`;
   const changed = state.route !== null && state.route !== route;
   state.route = route;
+  if (route === "melleklet") loadViewer();
+  else state.viewerReturn = window.location.hash;
   if (changed) {
     window.scrollTo(0, 0);
     const heading = element(`${ROUTES[route].panel}-title`);
@@ -681,7 +692,19 @@ function renderDetailedResults() {
       conversation.textContent = "Beszélgetés";
       conversation.title = "A feladó és a címzett személyeinek megnyitása a beszélgetésnézetben";
       conversation.addEventListener("click", () => openConversationForMessage(message));
-      row.append(checkbox, open, labels, conversation);
+      const actions = document.createElement("span");
+      actions.className = "detailed-result-actions";
+      if (Number(message.attachment_count) > 0) {
+        const attachments = document.createElement("button");
+        attachments.type = "button";
+        attachments.className = "button quiet";
+        attachments.textContent = "Mellékletek";
+        attachments.title = "A levél mellékletei a melléklet-nézegetőben";
+        attachments.addEventListener("click", () => openAttachmentViewer(Number(message.message_id)));
+        actions.append(attachments);
+      }
+      actions.append(conversation);
+      row.append(checkbox, open, labels, actions);
       results.append(row);
     });
   }
@@ -1486,7 +1509,23 @@ function renderMessageDetail(detail) {
   body.className = "reader-body";
   body.textContent = detail.body || "(Nincs megjeleníthető levéltörzs.)";
   pane.append(body);
-  appendBadgeSection(pane, "MELLÉKLETEK", detail.attachments.map((file) => `${file.filename} · ${file.content_type || "ismeretlen típus"}`));
+  if (detail.attachments.length) {
+    const section = document.createElement("section");
+    section.className = "reader-section";
+    const heading = document.createElement("h4");
+    heading.textContent = "MELLÉKLETEK";
+    section.append(heading);
+    detail.attachments.forEach((file) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "badge attachment-link";
+      button.textContent = `${file.filename} · ${file.content_type || "ismeretlen típus"}`;
+      button.title = "Megnyitás a melléklet-nézegetőben";
+      button.addEventListener("click", () => openAttachmentViewer(Number(detail.message.id), { name: file.filename }));
+      section.append(button);
+    });
+    pane.append(section);
+  }
   appendBadgeSection(pane, "CÍMKÉK", detail.labels);
 
   const forensic = document.createElement("section");
@@ -1689,7 +1728,18 @@ function conversationCard(message, people, personColors) {
   subject.className = "message-subject";
   appendHighlightedText(subject, message.subject || "(nincs tárgy)", element("conversation-query").value.trim());
   const badge = attachmentBadge(message);
-  if (badge) subject.append(badge);
+  if (badge) {
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "attachment-open";
+    open.title = `${badge.title} – megnyitás a melléklet-nézegetőben`;
+    open.setAttribute("aria-label", `${badge.getAttribute("aria-label")} – megnyitás a melléklet-nézegetőben`);
+    badge.removeAttribute("role");
+    badge.removeAttribute("aria-label");
+    open.append(badge);
+    open.addEventListener("click", () => openAttachmentViewer(Number(message.message_id)));
+    subject.append(open);
+  }
   if (message.thread_key) {
     const thread = document.createElement("span");
     thread.className = "thread-chip";
@@ -2071,6 +2121,415 @@ element("next-search-page").addEventListener("click", () => {
 element("export-search-csv-button").addEventListener("click", () => exportDetailedSearch("csv"));
 element("export-search-eml-button").addEventListener("click", () => exportDetailedSearch("eml_zip"));
 element("export-search-pdf-button").addEventListener("click", printDetailedSearchReport);
+
+/**
+ * Open the attachment viewer for a message, at an index or a file name.
+ */
+function openAttachmentViewer(messageId, target = {}) {
+  state.viewerPreferredName = target.name || null;
+  window.location.hash = `#/melleklet/${messageId}/${Number.isInteger(target.index) ? target.index : 0}`;
+}
+
+/**
+ * Load the attachment list of the viewed message, then the selected attachment.
+ */
+async function loadViewer() {
+  const target = state.viewerTarget;
+  if (!target) return;
+  const notice = element("viewer-notice");
+  notice.textContent = "";
+  notice.classList.remove("error");
+  try {
+    if (!state.viewer || state.viewer.messageId !== target.messageId) {
+      element("viewer-preview").replaceChildren(viewerMessage("A mellékletek betöltése és a forrás ellenőrzése…"));
+      const listing = await requestJson(`/api/messages/${target.messageId}/attachments`);
+      state.viewer = { messageId: target.messageId, ...listing, zoom: 100, page: 0 };
+      if (state.viewerPreferredName) {
+        const index = listing.attachments.findIndex((item) => item.name === state.viewerPreferredName);
+        state.viewerPreferredName = null;
+        if (index > 0) {
+          window.history.replaceState(null, "", `#/melleklet/${target.messageId}/${index}`);
+          state.viewerTarget = { messageId: target.messageId, path: String(index) };
+        }
+      }
+    }
+    const viewer = state.viewer;
+    const summary = viewer.message;
+    element("viewer-message-summary").textContent = [
+      summary.subject || "(nincs tárgy)",
+      `${(summary.from || []).join(", ") || "?"} → ${(summary.to || []).join(", ") || "?"}`,
+      formatTimestamp(summary.sent_timestamp),
+    ].join(" · ");
+    if (viewer.attachments.length === 0) {
+      element("attachment-viewer-title").textContent = "A levélnek nincs melléklete";
+      element("viewer-preview").replaceChildren(viewerMessage("Ennek a levélnek nincs melléklete."));
+      element("viewer-sheet").replaceChildren();
+      renderViewerTree();
+      return;
+    }
+    const path = state.viewerTarget.path;
+    if (viewer.path !== path) {
+      viewer.path = path;
+      viewer.page = 0;
+      viewer.zoom = 100;
+    }
+    renderViewerTree();
+    const entry = viewer.attachments[Number(path)] || viewer.attachments[0];
+    element("attachment-viewer-title").textContent = entry.name;
+    element("viewer-position").textContent = `${Number(path) + 1} / ${viewer.attachments.length}`;
+    element("viewer-prev").disabled = Number(path) === 0;
+    element("viewer-next").disabled = Number(path) >= viewer.attachments.length - 1;
+    element("viewer-zoom").textContent = `${viewer.zoom}%`;
+    const [info, preview] = await Promise.all([
+      requestJson(`/api/attachments/${viewer.messageId}/${path}/info`),
+      // For types without a preview the server only explains why; nothing is rendered.
+      requestJson(`/api/attachments/${viewer.messageId}/${path}/preview?page=${viewer.page}`)
+        .catch((error) => ({ kind: "error", reason: error.message })),
+    ]);
+    viewer.preview = preview || { kind: "none", reason: "" };
+    renderViewerSheet(info);
+    renderViewerPreview(entry, info);
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.classList.add("error");
+    element("viewer-preview").replaceChildren(viewerMessage(error.message, true));
+  }
+}
+
+/**
+ * A centred message card inside the preview area.
+ */
+function viewerMessage(text, isError = false) {
+  const card = document.createElement("div");
+  card.className = `viewer-message${isError ? " error" : ""}`;
+  card.textContent = text;
+  return card;
+}
+
+/**
+ * List the message's attachments; risky ones carry a warning marker.
+ */
+function renderViewerTree() {
+  const viewer = state.viewer;
+  const list = element("viewer-tree-list");
+  list.replaceChildren();
+  element("viewer-count").textContent = `(${viewer.attachments.length})`;
+  viewer.attachments.forEach((entry, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "viewer-tree-item";
+    const selected = String(index) === state.viewerTarget.path;
+    item.classList.toggle("selected", selected);
+    item.classList.toggle("warning", entry.warnings.length > 0);
+    item.setAttribute("aria-current", selected ? "true" : "false");
+    const kind = document.createElement("span");
+    kind.className = "viewer-kind";
+    kind.textContent = entry.executable ? "EXE" : entry.real_kind.toUpperCase().slice(0, 4);
+    const name = document.createElement("span");
+    name.className = "viewer-tree-name";
+    name.textContent = entry.name;
+    const meta = document.createElement("small");
+    meta.textContent = `${formatBytes(entry.size)}${entry.warnings.length ? " · figyelmeztetés" : ""}`;
+    item.append(kind, name, meta);
+    item.addEventListener("click", () => {
+      window.location.hash = `#/melleklet/${viewer.messageId}/${index}`;
+    });
+    list.append(item);
+  });
+}
+
+/**
+ * Render the analyst data sheet: file facts, type check, warnings, duplicates.
+ */
+function renderViewerSheet(info) {
+  const sheet = element("viewer-sheet");
+  sheet.replaceChildren();
+  const section = (title) => {
+    const block = document.createElement("section");
+    block.className = "viewer-sheet-section";
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    block.append(heading);
+    sheet.append(block);
+    return block;
+  };
+  const row = (block, label, value, className = "") => {
+    const line = document.createElement("div");
+    line.className = `viewer-sheet-row ${className}`;
+    const key = document.createElement("span");
+    key.textContent = label;
+    const text = document.createElement("strong");
+    text.textContent = value;
+    line.append(key, text);
+    block.append(line);
+    return line;
+  };
+  const file = section("Fájl");
+  row(file, "Név", info.name);
+  row(file, "Méret", `${formatBytes(info.size)} (${info.size.toLocaleString("hu-HU")} bájt)`);
+  row(file, "Megadott típus", info.declared_type || "—");
+  const typeMismatch = info.warnings.some((warning) => /álcázott|mást ígér|megadott típus|nem ismerhető fel/.test(warning));
+  row(file, "Valódi típus", `${info.real_label} · ${typeMismatch ? "ELTÉR a megadottól" : "egyezik"}`, typeMismatch ? "error" : "ok");
+  row(file, "SHA-256", info.sha256, "mono");
+  row(file, "Hely", info.location);
+
+  if (state.viewer.preview && state.viewer.preview.kind === "image") {
+    const image = state.viewer.preview;
+    const block = section("Képadatok");
+    row(block, "Méret", `${image.width} × ${image.height} képpont${image.pages > 1 ? ` · ${image.pages} oldal` : ""}`);
+    Object.entries(image.exif || {}).forEach(([key, value]) => row(block, key, value));
+    if (image.gps) row(block, "GPS-koordináta", image.gps, "error");
+  }
+
+  const signals = section("Elemzői jelzések");
+  if (info.warnings.length === 0) {
+    row(signals, "Figyelmeztetés", "nincs");
+  } else {
+    info.warnings.forEach((warning) => {
+      const line = document.createElement("p");
+      line.className = "viewer-warning";
+      line.textContent = warning;
+      signals.append(line);
+    });
+  }
+  if (state.viewer.preview && state.viewer.preview.gps) {
+    const line = document.createElement("p");
+    line.className = "viewer-warning";
+    line.textContent = "A kép GPS-helyadatot tartalmaz.";
+    signals.append(line);
+  }
+
+  const duplicates = section("Ugyanez a fájl máshol");
+  if (info.same_elsewhere.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "Nincs más ismert levélben ezzel a SHA-256-tal (csak a már megnyitott mellékletek hash-e ismert).";
+    duplicates.append(empty);
+  } else {
+    info.same_elsewhere.forEach((item) => {
+      const link = document.createElement("button");
+      link.type = "button";
+      link.className = "viewer-duplicate";
+      link.textContent = `${item.subject || "(nincs tárgy)"} · ${item.sender || "?"} · ${formatTimestamp(item.sent_timestamp)}`;
+      link.addEventListener("click", () => openAttachmentViewer(item.message_id, { index: Number(item.position) }));
+      duplicates.append(link);
+    });
+  }
+  const note = document.createElement("p");
+  note.className = "muted viewer-sheet-note";
+  note.textContent = "A melléklet az eredeti forrásból, a memóriában nyílik meg. Makrók, szkriptek, külső hivatkozások és beágyazott programok nem futnak.";
+  sheet.append(note);
+}
+
+/**
+ * Show the preview that matches the attachment's real type.
+ */
+function renderViewerPreview(entry, info) {
+  const area = element("viewer-preview");
+  area.replaceChildren();
+  const preview = state.viewer.preview;
+  const viewer = state.viewer;
+  if (!preview || preview.kind === "none" || preview.kind === "error") {
+    const card = viewerMessage(preview && preview.reason ? preview.reason : "Ehhez a melléklethez nincs előnézet.", preview && preview.kind === "error");
+    if (entry.executable || info.warnings.length) card.classList.add("warning");
+    area.append(card);
+    return;
+  }
+  const query = element("viewer-search").value.trim();
+  if (preview.kind === "text") {
+    const toolbar = document.createElement("div");
+    toolbar.className = "viewer-text-toolbar";
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = `Kódolás: ${preview.encoding}${preview.truncated ? " · csak az első 5 MB látszik; a teljes szöveghez mentse a fájlt" : ""}`;
+    toolbar.append(meta);
+    let showSource = Boolean(viewer.showSource && preview.source);
+    if (preview.source) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "button quiet";
+      toggle.textContent = showSource ? "Tisztított nézet" : "Forrás";
+      toggle.addEventListener("click", () => {
+        viewer.showSource = !showSource;
+        renderViewerPreview(entry, info);
+      });
+      toolbar.append(toggle);
+    }
+    const pre = document.createElement("pre");
+    pre.className = "viewer-text";
+    pre.style.fontSize = `${Math.round(11 * viewer.zoom / 100)}px`;
+    const lines = (showSource ? preview.source : preview.text).split("\n");
+    lines.forEach((line, index) => {
+      const number = document.createElement("span");
+      number.className = "line-number";
+      number.textContent = String(index + 1).padStart(4, " ");
+      pre.append(number);
+      appendHighlightedText(pre, `${line}\n`, query);
+    });
+    area.append(toolbar, pre);
+  } else if (preview.kind === "table") {
+    const meta = document.createElement("p");
+    meta.className = "muted";
+    const first = preview.page * preview.page_size + 1;
+    const last = Math.min(preview.total_rows, first + preview.rows.length - 1);
+    meta.textContent = `Kódolás: ${preview.encoding} · elválasztó: ${preview.delimiter} · sorok ${first}–${last} / ${preview.total_rows}`;
+    const wrapper = document.createElement("div");
+    wrapper.className = "viewer-table-wrapper";
+    const table = document.createElement("table");
+    table.className = "viewer-table";
+    table.style.fontSize = `${Math.round(11 * viewer.zoom / 100)}px`;
+    preview.rows.forEach((cells, rowIndex) => {
+      const tr = document.createElement("tr");
+      const number = document.createElement("th");
+      number.textContent = String(first + rowIndex);
+      tr.append(number);
+      cells.forEach((cell) => {
+        const td = document.createElement(rowIndex === 0 && preview.page === 0 ? "th" : "td");
+        appendHighlightedText(td, cell, query);
+        tr.append(td);
+      });
+      table.append(tr);
+    });
+    wrapper.append(table);
+    area.append(meta, wrapper, viewerPager(preview.page, Math.ceil(preview.total_rows / preview.page_size)));
+  } else if (preview.kind === "image") {
+    const figure = document.createElement("div");
+    figure.className = "viewer-image";
+    const image = document.createElement("img");
+    image.src = preview.image_url;
+    image.alt = `${entry.name} – ${preview.page + 1}. oldal`;
+    image.style.width = `${Math.round(preview.width * viewer.zoom / 100)}px`;
+    figure.append(image);
+    area.append(figure);
+    if (preview.pages > 1) area.append(viewerPager(preview.page, preview.pages));
+  }
+  const firstMark = area.querySelector("mark");
+  if (firstMark) firstMark.scrollIntoView({ block: "center" });
+}
+
+/**
+ * Previous/next page buttons for multi-page tables and images.
+ */
+function viewerPager(page, pages) {
+  const pager = document.createElement("div");
+  pager.className = "viewer-pager";
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.className = "button quiet";
+  previous.textContent = "‹ Előző oldal";
+  previous.disabled = page <= 0;
+  previous.addEventListener("click", () => { state.viewer.page = page - 1; refreshViewerPreview(); });
+  const label = document.createElement("span");
+  label.textContent = `${page + 1} / ${Math.max(1, pages)}`;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "button quiet";
+  next.textContent = "Következő oldal ›";
+  next.disabled = page >= pages - 1;
+  next.addEventListener("click", () => { state.viewer.page = page + 1; refreshViewerPreview(); });
+  pager.append(previous, label, next);
+  return pager;
+}
+
+/**
+ * Reload only the preview (page change) of the current attachment.
+ */
+async function refreshViewerPreview() {
+  const viewer = state.viewer;
+  const entry = viewer.attachments[Number(viewer.path)];
+  try {
+    viewer.preview = await requestJson(`/api/attachments/${viewer.messageId}/${viewer.path}/preview?page=${viewer.page}`);
+    renderViewerPreview(entry, { warnings: entry.warnings });
+  } catch (error) {
+    element("viewer-notice").textContent = error.message;
+    element("viewer-notice").classList.add("error");
+  }
+}
+
+/**
+ * Step to the previous or next attachment of the message.
+ */
+function stepViewer(delta) {
+  const viewer = state.viewer;
+  if (!viewer || viewer.attachments.length === 0) return;
+  const index = Number(state.viewerTarget.path) + delta;
+  if (index < 0 || index >= viewer.attachments.length) return;
+  window.location.hash = `#/melleklet/${viewer.messageId}/${index}`;
+}
+
+/**
+ * Change the preview zoom between 25% and 400%.
+ */
+function zoomViewer(delta) {
+  const viewer = state.viewer;
+  if (!viewer) return;
+  viewer.zoom = Math.min(400, Math.max(25, viewer.zoom + delta));
+  element("viewer-zoom").textContent = `${viewer.zoom}%`;
+  const entry = viewer.attachments[Number(viewer.path)];
+  if (entry) renderViewerPreview(entry, { warnings: entry.warnings });
+}
+
+/**
+ * Leave the viewer towards the page it was opened from.
+ */
+function closeViewer() {
+  const target = state.viewerReturn && !state.viewerReturn.startsWith("#/melleklet") ? state.viewerReturn : "#/archivum";
+  window.location.hash = target;
+}
+
+/**
+ * Save one attachment or all of them through the native save dialog.
+ */
+async function saveFromViewer(all) {
+  const viewer = state.viewer;
+  if (!viewer) return;
+  const notice = element("viewer-notice");
+  try {
+    const result = await requestJson(
+      all ? `/api/messages/${viewer.messageId}/attachments/save-all` : `/api/attachments/${viewer.messageId}/${viewer.path}/save`,
+      { method: "POST", body: "{}" },
+    );
+    notice.classList.remove("error");
+    notice.textContent = result.cancelled
+      ? "A mentés megszakítva."
+      : `Mentve: ${result.saved_path}${all ? " (MANIFEST.txt-vel)" : " (mellette .sha256 és .eredet.txt)"}`;
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.classList.add("error");
+  }
+}
+
+element("viewer-back").addEventListener("click", closeViewer);
+element("viewer-prev").addEventListener("click", () => stepViewer(-1));
+element("viewer-next").addEventListener("click", () => stepViewer(1));
+element("viewer-zoom-in").addEventListener("click", () => zoomViewer(25));
+element("viewer-zoom-out").addEventListener("click", () => zoomViewer(-25));
+element("viewer-save").addEventListener("click", () => saveFromViewer(false));
+element("viewer-save-all").addEventListener("click", () => saveFromViewer(true));
+element("viewer-search").addEventListener("input", () => {
+  const viewer = state.viewer;
+  const entry = viewer && viewer.attachments[Number(viewer.path)];
+  if (entry) renderViewerPreview(entry, { warnings: entry.warnings });
+});
+document.addEventListener("keydown", (event) => {
+  if (state.route !== "melleklet") return;
+  const target = event.target;
+  const typing = target instanceof HTMLElement && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName);
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+    event.preventDefault();
+    element("viewer-search").focus();
+    element("viewer-search").select();
+  } else if (event.key === "Escape") {
+    if (typing && target.value) return;
+    event.preventDefault();
+    closeViewer();
+  } else if (!typing && !event.ctrlKey && !event.altKey) {
+    if (event.key === "ArrowLeft") stepViewer(-1);
+    else if (event.key === "ArrowRight") stepViewer(1);
+    else if (event.key === "+" || event.key === "=") zoomViewer(25);
+    else if (event.key === "-") zoomViewer(-25);
+  }
+});
 
 /**
  * Load the case currently selected when the local page opens.

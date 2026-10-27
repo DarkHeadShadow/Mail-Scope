@@ -12,6 +12,7 @@ from typing import Iterator
 from .discover import eml_files
 from .models import Attachment, FolderInfo, MessageLocator, MessageMetadata
 from .content import (
+    message_attachments,
     message_addresses,
     message_body_text,
     message_participant_names,
@@ -68,6 +69,10 @@ class EmlReader:
     def open_attachment(self, locator: MessageLocator, index: int) -> Attachment:
         """Load a single attachment from the EML file on demand."""
         return _attachment(self.open_message(locator), index)
+
+    def open_attachments(self, locator: MessageLocator) -> list[Attachment]:
+        """Load all attachments of the message into memory, in indexing order."""
+        return message_attachments(self.open_message(locator))
 
     def close(self) -> None:
         """EML reads use short-lived file handles; nothing stays open."""
@@ -128,6 +133,10 @@ class EmlDirectoryReader:
     def open_attachment(self, locator: MessageLocator, index: int) -> Attachment:
         """Load a single attachment from one EML file on demand."""
         return _attachment(self.open_message(locator), index)
+
+    def open_attachments(self, locator: MessageLocator) -> list[Attachment]:
+        """Load all attachments of one EML file into memory, in indexing order."""
+        return message_attachments(self.open_message(locator))
 
     def close(self) -> None:
         """EML reads use short-lived file handles; nothing stays open."""

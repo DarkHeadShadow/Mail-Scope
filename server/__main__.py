@@ -26,6 +26,11 @@ def main() -> None:
     """Start the browser UI on the local machine only."""
     parser = argparse.ArgumentParser(description="Run the local Mail-Scope application.")
     parser.add_argument("--port", type=int, default=8765, help="Local HTTP port.")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser (for automated checks and development).",
+    )
     arguments = parser.parse_args()
     log_path = configure_logging()
     logging.getLogger(__name__).info("Mail-Scope application log: %s", log_path)
@@ -48,7 +53,9 @@ def main() -> None:
     )
     server_thread.start()
     try:
-        if not webbrowser.open(address, new=2):
+        if arguments.no_browser:
+            logging.getLogger(__name__).info("Mail-Scope is running at %s (browser not opened)", address)
+        elif not webbrowser.open(address, new=2):
             logging.getLogger(__name__).warning(
                 "The default browser did not open automatically: %s", address
             )
