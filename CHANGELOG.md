@@ -2,9 +2,11 @@
 
 **Project creator: Bálint Szabolcs**
 
-Project changes are recorded here. This project has not made a public release yet.
+Project changes are recorded here.
 
-## [0.1.0] - Development snapshot
+## [0.1.0] - 2026-10-27
+
+First release.
 
 - Added direct MBOX, EML, and optional PST/OST source readers with content-based discovery.
 - Added a case-local SQLite/FTS5 index with resumable background indexing and source SHA-256 verification.
@@ -50,4 +52,3 @@ Project changes are recorded here. This project has not made a public release ye
 - Added a Windows installer (Inno Setup, `installer\Mail-Scope.iss`, built by `build_windows.bat` when Inno Setup 6 or 7 is present and by the CI on every push): it installs Mail-Scope under Program Files with a Start menu entry and offers the newest official 7-Zip (SHA-256 from the GitHub release) and LibreOffice of the Still branch (SHA-256 from the TDF download server and digital signature checked), downloaded during setup and installed silently without taking over Office file types. Neither is bundled; if a download fails, setup still finishes. Releases carry the installer next to the zip.
 - Selected the MIT License for Mail-Scope; third-party components retain their own licenses.
 
-This is a development snapshot, not a public release.

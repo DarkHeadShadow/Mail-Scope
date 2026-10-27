@@ -4,7 +4,7 @@
 
 A Mail-Scope offline, helyben futó levélnéző és -elemző program. Közvetlenül olvassa a postafiókforrásokat, a levél-metaadatokat és kereshető tartalmat az ügy SQLite-adatbázisába indexeli, a teljes eredeti levelet pedig kérésre az eredeti forrásból nyitja meg.
 
-> **Fejlesztési állapot:** `0.1.0` verzió. A projekt aktív fejlesztés alatt áll; még nincs aláírt vagy kiadott Windows-alkalmazás. A Mail-Scope MIT-licencű; a külső összetevők a saját licencük alatt maradnak.
+> **Állapot:** első kiadás, `0.1.0`. A telepítő (`Mail-Scope-Setup-0.1.0-x64.exe`) és a hordozható `Mail-Scope-windows-x64.zip` a [Releases](https://github.com/DarkHeadShadow/Mail-Scope/releases) oldalról tölthető le. A program nincs digitálisan aláírva, ezért az első indításkor a Windows SmartScreen figyelmeztethet („További információ” → „Futtatás mindenképp”). A Mail-Scope MIT-licencű; a külső összetevők a saját licencük alatt maradnak.
 
 ## Funkciók
 
@@ -102,7 +102,6 @@ A mellékletes leveleknél a találatokban, az Archívum listájában és a besz
 - A melléklet-szöveg keresésében nincs OCR, a jelszavas archívumok belsejét nem dolgozza fel, és fájlonként legfeljebb 2 MB szöveget tárol.
 - A PDF a böngésző nyomtatási párbeszédablakán keresztül készül, nem beépített PDF-könyvtárral.
 - A helyi válaszok méretének korlátozására keresési és exportlimitek vannak.
-- A nyilvános közzététel előkészítése még hátravan.
 
 ## Harmadik féltől származó összetevők
 

@@ -200,12 +200,13 @@ Forrás lehet:
    követelményfájl, a `run_dev.bat`, a `build_windows.bat`, a `0.1.0` verziómetaadat,
    a changelog és az angol/magyar README. A PDF-jelentés legfeljebb 2000 találatot
    tartalmaz; a kitalált adatokkal készült keresési képernyőkép megtalálható a
-   `docs/screenshots/` mappában. A projektlicenc kiválasztása a kiadás előtt pótlandó.
+   `docs/screenshots/` mappában. A projektlicenc: MIT (a felhasználó választotta).
 8. Felkészítés a GitHubra (lásd lent), első kiadás.
    - [x] Telepítő (Inno Setup, `installer/Mail-Scope.iss`): Program Files, Start menü;
      választhatóan a legfrissebb hivatalos 7-Zip (GitHub-kiadás SHA-256-tal) és LibreOffice
      Still ág (TDF, SHA-256 és digitális aláírás) letöltése és csendes telepítése; hiba esetén a
      Mail-Scope akkor is feltelepül. A CI minden feltöltéskor elkészíti, és a kiadáshoz csatolja.
+   - [x] Első kiadás: `v0.1.0` (2026-10-27), a GitHub Release-ben a telepítővel és a ZIP-pel.
 9. Melléklet-nézegető a 4. képernyő szerint (`docs/feladatok/melleklet-nezegeto.md`):
    formátumonkénti előnézet elkülönített, időkorlátos feldolgozással, opcionális LibreOffice,
    elemzői adatlap, mentés, kapcsolható melléklet-szöveg az FTS-ben.
