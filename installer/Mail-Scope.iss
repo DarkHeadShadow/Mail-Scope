@@ -1,6 +1,6 @@
 ﻿; Project creator: Bálint Szabolcs
 ;
-; Mail-Scope installer (Inno Setup 6.7). Build from the repository root after
+; Mail-Scope installer (Inno Setup 6.7 or 7). Build from the repository root after
 ; build_windows.bat:  ISCC /DAppVersion=0.1.0 installer\Mail-Scope.iss
 ;
 ; Optional helpers are not bundled: when selected, the newest official
@@ -115,8 +115,8 @@ begin
   begin
     WizardForm.ProgressGauge.Max := 1000;
     WizardForm.ProgressGauge.Position := Integer(Progress * 1000 div ProgressMax);
-    WizardForm.StatusLabel.Caption := Format('%s letöltése… %d / %d MB',
-      [CurrentDownload, Integer(Progress div 1048576), Integer(ProgressMax div 1048576)]);
+    WizardForm.StatusLabel.Caption := Format('%s letöltése… %d / %d MB', [CurrentDownload,
+      Integer(Progress div 1048576), Integer(ProgressMax div 1048576)]);
   end;
   Result := True;
 end;
