@@ -4,7 +4,7 @@
 
 Mail-Scope is an offline, local-first mail archive browser and analysis tool. It reads mail archives directly, indexes message metadata and searchable text in a case-local SQLite database, and opens the original message from its source when requested.
 
-> **Status:** first release, `0.1.0`. Download the installer (`Mail-Scope-Setup-0.1.0-x64.exe`) or the portable `Mail-Scope-windows-x64.zip` from the [Releases](https://github.com/DarkHeadShadow/Mail-Scope/releases) page. The program is not code-signed, so Windows SmartScreen may warn before the first start (“More info” → “Run anyway”). Mail-Scope is licensed under the MIT License; third-party components retain their own licenses.
+> **Status:** current release `0.1.1`. Download the installer (`Mail-Scope-Setup-0.1.1-x64.exe`) or the portable `Mail-Scope-windows-x64.zip` from the [Releases](https://github.com/DarkHeadShadow/Mail-Scope/releases) page. The program is not code-signed, so Windows SmartScreen may warn before the first start (“More info” → “Run anyway”). Mail-Scope is licensed under the MIT License; third-party components retain their own licenses.
 
 ## Features
 

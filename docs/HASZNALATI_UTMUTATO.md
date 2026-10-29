@@ -1,6 +1,6 @@
 # Mail-Scope – használati útmutató
 
-Készítő: **Bálint Szabolcs** · Verzió: 0.1.0
+Készítő: **Bálint Szabolcs** · Verzió: 0.1.1
 
 A Mail-Scope helyben futó levélnéző és -elemző program. Közvetlenül olvassa az Outlook (PST, OST),
 Thunderbird, Apple Mail, Gmail Takeout (MBOX) és EML postafiókokat, nem kell előtte semmit
