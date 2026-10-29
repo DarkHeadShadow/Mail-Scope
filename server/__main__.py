@@ -11,6 +11,27 @@ import webbrowser
 from .app import MailScopeApplication, create_server, default_recent_cases_file
 from .applog import configure_logging
 
+# Also named in installer\Mail-Scope.iss (AppMutex).
+_INSTANCE_MUTEX = "Mail-Scope-Running"
+
+
+def _hold_instance_mutex() -> None:
+    """Hold a named mutex until exit so setup refuses to replace a running copy.
+
+    Overwriting or uninstalling the files of a running instance leaves it
+    serving without its UI and Tcl/Tk data, so the pickers fail.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    # The handles stay open on purpose; Windows closes them when the process exits.
+    for name in (_INSTANCE_MUTEX, "Global\\" + _INSTANCE_MUTEX):
+        kernel32.CreateMutexW(None, False, name)
+
 
 def _notify_startup_problem(message: str) -> None:
     """Show startup failures in a dialog when the executable has no console."""
@@ -45,6 +66,7 @@ def main() -> None:
             f"Lehet, hogy már fut egy példány, vagy a port foglalt.\n\n{error}"
         )
         return
+    _hold_instance_mutex()
     address = f"http://127.0.0.1:{http_server.server_address[1]}"
     server_thread = threading.Thread(
         target=http_server.serve_forever,

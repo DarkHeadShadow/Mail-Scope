@@ -66,6 +66,10 @@
             <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ADE80" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
             Offline mód – az adatok nem hagyják el a gépet
           </span>
+          <span class="welcome-background-note">
+            A böngészőfül bezárása nem állítja le a programot, a háttérben tovább fut.
+            <button id="welcome-shutdown" class="welcome-button compact" type="button">Leállítás</button>
+          </span>
         </footer>
       </div>
     </div>
@@ -89,6 +93,10 @@
           <span class="privacy-dot"></span>
           <div><strong>Helyi feldolgozás</strong><small>Az adatok nem hagyják el ezt a gépet.</small></div>
         </div>
+        <div class="privacy-card background-card">
+          <span class="privacy-dot"></span>
+          <div><strong>Háttérben fut</strong><small>A böngészőfül bezárása nem állítja le a programot. Kilépéshez használja a Leállítás gombot.</small></div>
+        </div>
         <p class="creator">Készítette: Bálint Szabolcs</p>
       </aside>
 
@@ -103,7 +111,7 @@
               <span class="status-light"></span>
               <span id="case-label">Nincs megnyitott ügy</span>
             </div>
-            <button id="shutdown-button" class="button danger" type="button">Leállítás</button>
+            <button id="shutdown-button" class="button danger" type="button" title="A Mail-Scope leállítása. A böngészőfül bezárása nem állítja le, a háttérben tovább fut.">Leállítás</button>
           </div>
         </header>
 
