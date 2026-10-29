@@ -4,7 +4,7 @@
 
 Project changes are recorded here.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-29
 
 - The welcome screen and the sidebar now say that closing the browser tab leaves Mail-Scope running in the background; the welcome screen got its own **Leállítás** button, and closing or reloading the tab asks for confirmation with the browser's leave-page prompt.
 

@@ -207,6 +207,7 @@ Forrás lehet:
      Still ág (TDF, SHA-256 és digitális aláírás) letöltése és csendes telepítése; hiba esetén a
      Mail-Scope akkor is feltelepül. A CI minden feltöltéskor elkészíti, és a kiadáshoz csatolja.
    - [x] Első kiadás: `v0.1.0` (2026-10-27), a GitHub Release-ben a telepítővel és a ZIP-pel.
+   - [x] `v0.1.1` (2026-10-29): a telepítő nem írja felül a futó programot; figyelmeztetés, hogy a fül bezárása után a program a háttérben fut.
 9. Melléklet-nézegető a 4. képernyő szerint (`docs/feladatok/melleklet-nezegeto.md`):
    formátumonkénti előnézet elkülönített, időkorlátos feldolgozással, opcionális LibreOffice,
    elemzői adatlap, mentés, kapcsolható melléklet-szöveg az FTS-ben.
