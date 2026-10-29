@@ -352,13 +352,24 @@ async function requestJson(path, options = {}) {
   return payload;
 }
 
-element("shutdown-button").addEventListener("click", shutdownApplication);
+let applicationStopped = false;
+
+element("shutdown-button").addEventListener("click", () => shutdownApplication("shutdown-button"));
+element("welcome-shutdown").addEventListener("click", () => shutdownApplication("welcome-shutdown"));
+
+// Closing the tab leaves the server running; browsers show only their own
+// generic leave-page prompt, the on-page notes explain the reason.
+window.addEventListener("beforeunload", (event) => {
+  if (applicationStopped) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 /**
  * Confirm the running-job state before safely stopping the local application.
  */
-async function shutdownApplication() {
-  const button = element("shutdown-button");
+async function shutdownApplication(buttonId) {
+  const button = element(buttonId);
   button.disabled = true;
   try {
     const status = await requestJson("/api/status");
@@ -374,6 +385,7 @@ async function shutdownApplication() {
       method: "POST",
       body: JSON.stringify({ cancel_indexing: indexing }),
     });
+    applicationStopped = true;
     const shutdownScreen = document.createElement("main");
     shutdownScreen.className = "shutdown-screen";
     shutdownScreen.setAttribute("role", "status");
@@ -386,7 +398,12 @@ async function shutdownApplication() {
     shutdownScreen.append(title, detail);
     document.body.replaceChildren(shutdownScreen);
   } catch (error) {
-    showNotice(error.message, true);
+    if (element("welcome-screen").hidden) {
+      showNotice(error.message, true);
+    } else {
+      element("welcome-notice").textContent = error.message;
+      element("welcome-notice").classList.add("error");
+    }
     button.disabled = false;
   }
 }

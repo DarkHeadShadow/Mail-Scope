@@ -56,6 +56,8 @@ code { color: var(--green); }
 .sidebar-spacer { flex: 1; }
 .privacy-card { display: flex; gap: 10px; padding: 13px 11px; border: 1px solid var(--line); border-radius: 8px; }
 .privacy-card strong { font-size: 11px; }
+.background-card { margin-top: 8px; }
+.background-card .privacy-dot { background: #e0b25c; box-shadow: 0 0 12px #e0b25c; }
 .privacy-dot, .status-light { flex: 0 0 auto; width: 7px; height: 7px; margin-top: 4px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px #56c982; }
 .creator { margin: 14px 0 0; color: #65746c; font-size: 10px; }
 .main-area { max-width: 1660px; margin-left: 238px; padding: 0 34px 24px; }
@@ -505,6 +507,8 @@ body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
 }
 .welcome-fog-bottom { background: linear-gradient(to top, rgba(5, 8, 7, .95) 0%, rgba(5, 8, 7, .7) 9%, rgba(5, 8, 7, 0) 22%); }
 .welcome-offline { display: flex; align-items: center; gap: 8px; }
+.welcome-background-note { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-basis: 100%; }
+.welcome-background-note .welcome-button.compact { min-height: 30px; padding: 0 12px; font-size: 12px; }
 
 .ms-pulse { fill: none; stroke-linecap: round; animation-timing-function: linear; animation-iteration-count: infinite; }
 .ms-pulse-halo { opacity: .3; }

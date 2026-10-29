@@ -28,6 +28,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 LicenseFile=..\LICENSE
 SetupIconFile=..\assets\logo\mail-scope.ico
 UninstallDisplayIcon={app}\Mail-Scope.exe
+; Held by a running Mail-Scope (server\__main__.py): setup and uninstall ask
+; to stop it first instead of replacing files under it.
+AppMutex=Mail-Scope-Running,Global\Mail-Scope-Running
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes

@@ -4,6 +4,12 @@
 
 Project changes are recorded here.
 
+## [Unreleased]
+
+- The welcome screen and the sidebar now say that closing the browser tab leaves Mail-Scope running in the background; the welcome screen got its own **Leállítás** button, and closing or reloading the tab asks for confirmation with the browser's leave-page prompt.
+
+- Setup and uninstall now ask to stop a running Mail-Scope first (Inno Setup `AppMutex`). Replacing the files of a running instance left it without its UI and Tcl/Tk data, so the folder and file pickers failed with an internal error.
+
 ## [0.1.0] - 2026-10-27
 
 First release.
