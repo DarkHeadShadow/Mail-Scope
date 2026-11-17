@@ -199,7 +199,7 @@ van kapcsolva.
 - **Bekapcsolva** a program a háttérben újra beolvassa a mellékletes leveleket a változatlan
   forrásból (a leveleket nem indexeli újra), és kinyeri a mellékletek szövegét:
   - PDF (oldalanként), Word (DOCX), Excel (XLSX, XLS; munkalaponként, a rejtett lapokat is), CSV,
-    szöveges és HTML fájlok, csatolt levelek (EML, MSG);
+    szöveges és HTML fájlok, csatolt levelek (EML, MSG, winmail.dat);
   - archívumokban (ZIP, 7z, gzip; RAR telepített 7-Zippel) és csatolt levelekben lévő ugyanilyen
     fájlok; jelszavas archívum belseje nem;
   - mellékletenként legfeljebb 2 MB szöveg.
@@ -363,6 +363,13 @@ nem változnak. A címkékre a „Címke” feltétellel lehet keresni.
 Minden export (CSV, EML ZIP, PDF) pontosan azt a halmazt adja, amely a képernyőn látszik,
 a „Csak melléklettel” szűréssel együtt.
 
+A találatok fölötti **Minden találat kijelölése** jelölőnégyzet az összes találatot kijelöli, a többi
+oldalon lévőket is (legfeljebb 10 000-et). Egyes leveleket a soruk jelölőnégyzetével is ki lehet
+jelölni vagy a kijelölésből kivenni; a kijelölés oldalváltáskor megmarad, új keresésnél törlődik.
+Ha van kijelölés, a CSV, az EML ZIP és a PDF-jelentés **csak a kijelölt leveleket** tartalmazza (a
+jelentés fejléce jelzi, hogy kijelölt találatokról szól); kijelölés nélkül minden találatot. A
+címkézés is a kijelölt levelekre vonatkozik.
+
 - **CSV export** – legfeljebb 10 000 találat; Excelben közvetlenül megnyitható (UTF-8), a képletnek
   látszó értékek semlegesítve. A „Mellékletek száma” és „Mellékletek neve” (pontosvesszővel
   elválasztva) oszlop is benne van.
@@ -466,7 +473,7 @@ az 1. fájl.
 | Régi Word és PowerPoint (DOC, PPT), PPTX, RTF, OpenDocument | Pontos nézet LibreOffice-szal (lásd lent); enélkül adatlap és mentés |
 | HTML | **Formázott** fül tisztítva, homokozott keretben; **Szöveg** és **Forrás** fül |
 | ZIP, 7z, RAR, gzip | tartalomjegyzék (fájl, méret, tömörített méret, valódi típus, módosítás, állapot); a fájlok a táblázatból vagy a fából nyithatók meg, kicsomagolás nélkül, a memóriában |
-| Csatolt levél (EML, MSG) | fejlécek (feladó, címzett, dátum, tárgy, Message-ID), törzs (**Formázott** fül tisztítva, homokozott keretben, ha van HTML-törzs; **Szöveg** fül), a levél saját mellékletei |
+| Csatolt levél (EML, MSG, winmail.dat) | fejlécek (feladó, címzett, dátum, tárgy, Message-ID), törzs (**Formázott** fül tisztítva, homokozott keretben, ha van HTML-törzs; **Szöveg** fül), a levél saját mellékletei |
 | Futtatható fájl (EXE, DLL, MSI, BAT, PS1, JS, VBS, LNK…) | előnézet nincs, csak adatlap és mentés |
 
 A formázott (Word, HTML) nézet egy elkülönített, homokozott keretben jelenik meg: szkript, űrlap,
@@ -528,6 +535,11 @@ bármikor telepíthető.
 - **Outlook MSG:** a program saját olvasóval, a fájl MAPI-tulajdonságaiból állítja össze a
   levelet (fejlécek, szöveges és HTML-törzs, mellékletek, beágyazott Outlook-elemek). Ha az
   MSG-ben benne vannak az eredeti internetes fejlécek, azok az irányadók.
+- **winmail.dat (TNEF):** az Outlook rich-text formátumban küldött levelek mellékleteit és
+  törzsét egyetlen `winmail.dat` fájlba csomagolja. A program ezt is csatolt levélként nyitja meg:
+  a törzset (a tömörített RTF-ből, HTML-t is visszaállítva) és a csomagban lévő mellékleteket,
+  beágyazott Outlook-elemeket a fában mutatja, a szövegük pedig kereshető. A csomagban gyakran
+  nincs feladó és címzett – ezek a hordozó levélben vannak.
 - **Gyanús fájl az archívumban:** ha egy archívumban futtatható vagy álcázott fájl van, az a fában
   sárga jelzést kap, az archívum adatlapja megnevezi, és a levél gemkapcsa is sárga lesz.
 
@@ -539,7 +551,7 @@ Legfeljebb 200 MB-os mellékletnél van előnézet; a szövegnézet az első 5 M
   ELTÉR), SHA-256, hely a forrásban (forrásfájl › mappa › levél › melléklet › archívumon belüli
   út), archívumban lévő fájlnál az útvonal és a módosítás ideje.
 - **Archívum:** formátum, bejegyzések száma, kibontott méret, tömörítési arány, titkosított
-  fájlok száma; csatolt levélnél a formátum (EML/MSG) és a mellékletek száma.
+  fájlok száma; csatolt levélnél a formátum (EML/MSG/TNEF) és a mellékletek száma.
 - **Dokumentum-metaadatok:** szerző, utolsó mentő, cím, létrehozás és módosítás ideje, készítő
   program, oldalak / munkalapok, képletek és megjegyzések száma.
 - **Biztonság (PDF):** beágyazott JavaScript, beágyazott fájl, űrlapmezők, digitális aláírás

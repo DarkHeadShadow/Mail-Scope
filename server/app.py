@@ -97,6 +97,8 @@ _MAX_REQUEST_BYTES = 1_000_000
 _MAX_QUERY_LENGTH = 512
 # A message attachment ("2") or a file inside archives / attached e-mails ("2/0/3").
 MAX_NESTING_DEPTH = 5
+# The largest detailed-search selection ("select all hits"); also the CSV export limit.
+MAX_SELECTED_MESSAGES = 10000
 _ATTACHMENT_PATH = re.compile(r"\d{1,4}(?:/\d{1,5}){0,5}")
 
 
@@ -644,8 +646,12 @@ class MailScopeApplication:
         limit: int,
         offset: int,
         has_attachment: bool = False,
+        message_ids: tuple[int, ...] | None = None,
     ) -> dict[str, Any]:
-        """Run a validated detailed search with pagination and result count."""
+        """Run a validated detailed search with pagination and result count.
+
+        ``message_ids`` narrows the hits to the selected messages.
+        """
         with self._lock:
             database = self._require_case()
             rows, total = database.detailed_search(
@@ -654,6 +660,7 @@ class MailScopeApplication:
                 limit=limit,
                 offset=offset,
                 has_attachment=has_attachment,
+                message_ids=message_ids,
             )
             return {
                 "results": _with_attachment_hits(
@@ -664,6 +671,30 @@ class MailScopeApplication:
                 "offset": offset,
             }
 
+    def detailed_search_ids(
+        self,
+        conditions: tuple[dict[str, Any], ...],
+        *,
+        operator: str,
+        has_attachment: bool = False,
+    ) -> dict[str, Any]:
+        """Return the message IDs of every hit, for "select all hits"."""
+        with self._lock:
+            database = self._require_case()
+            rows, total = database.detailed_search(
+                conditions,
+                operator=operator,
+                limit=MAX_SELECTED_MESSAGES + 1,
+                has_attachment=has_attachment,
+                ids_only=True,
+            )
+            if total > MAX_SELECTED_MESSAGES:
+                raise ApiError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    f"Egyszerre legfeljebb {MAX_SELECTED_MESSAGES} találat jelölhető ki; szűkítse a keresést.",
+                )
+            return {"message_ids": [int(row["id"]) for row in rows], "total": total}
+
     def detailed_search_export(
         self,
         conditions: tuple[dict[str, Any], ...],
@@ -671,8 +702,13 @@ class MailScopeApplication:
         operator: str,
         export_format: str,
         has_attachment: bool = False,
+        message_ids: tuple[int, ...] | None = None,
     ) -> tuple[bytes, str, str]:
-        """Export bounded detailed-search hits as CSV or verified original EML files."""
+        """Export bounded detailed-search hits as CSV or verified original EML files.
+
+        With ``message_ids`` only the selected hits are exported, and the size
+        limits apply to the selection instead of the whole result.
+        """
         if export_format not in {"csv", "eml_zip"}:
             raise ValueError("Az exportformátum CSV vagy EML ZIP legyen.")
         with self._lock:
@@ -682,12 +718,19 @@ class MailScopeApplication:
                 operator=operator,
                 limit=10001 if export_format == "csv" else 501,
                 has_attachment=has_attachment,
+                message_ids=message_ids,
             )
             maximum = 10000 if export_format == "csv" else 500
             if total > maximum:
                 raise ApiError(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                    f"Ez az export legfeljebb {maximum} találatot tartalmazhat; szűkítse a keresést.",
+                    f"Ez az export legfeljebb {maximum} találatot tartalmazhat; "
+                    + ("jelöljön ki kevesebb levelet." if message_ids is not None else "szűkítse a keresést."),
+                )
+            if message_ids is not None and not rows:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    "A kijelölt levelek már nem szerepelnek a találatok között; futtassa újra a keresést.",
                 )
             if export_format == "csv":
                 output = io.StringIO(newline="")
@@ -1892,6 +1935,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         operator=operator,
                         export_format=_required_string(payload, "format"),
                         has_attachment=_payload_boolean(payload, "has_attachment"),
+                        message_ids=_payload_message_ids(payload),
                     )
                 )
                 self.send_response(HTTPStatus.OK.value)
@@ -1906,6 +1950,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            elif path == "/api/search/ids":
+                conditions, operator = self._search_conditions(payload)
+                response = self.server.application.detailed_search_ids(
+                    conditions,
+                    operator=operator,
+                    has_attachment=_payload_boolean(payload, "has_attachment"),
+                )
             elif path == "/api/search":
                 conditions, operator = self._search_conditions(payload)
                 limit = _payload_integer(payload, "limit", 100, maximum=200)
@@ -1916,6 +1967,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     limit=limit,
                     offset=offset,
                     has_attachment=_payload_boolean(payload, "has_attachment"),
+                    message_ids=_payload_message_ids(payload),
                 )
             elif path == "/api/searches":
                 conditions, operator = self._search_conditions(payload)
@@ -2319,6 +2371,25 @@ def _payload_boolean(payload: dict[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"A(z) {key} mező logikai érték (true/false) legyen.")
     return value
+
+
+def _payload_message_ids(payload: dict[str, Any]) -> tuple[int, ...] | None:
+    """Read the optional list of selected message IDs of a detailed search."""
+    value = payload.get("message_ids")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= MAX_SELECTED_MESSAGES
+        or not all(
+            isinstance(message_id, int) and not isinstance(message_id, bool) and message_id > 0
+            for message_id in value
+        )
+    ):
+        raise ValueError(
+            f"A message_ids 1 és {MAX_SELECTED_MESSAGES} közötti számú pozitív egész azonosító listája legyen."
+        )
+    return tuple(value)
 
 
 def _csv_safe(value: Any) -> str:

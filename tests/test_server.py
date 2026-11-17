@@ -1360,6 +1360,80 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post("/api/search", {"conditions": [], "operator": "AND"})[0], 400)
 
+    def test_selected_hits_limit_search_export_and_report(self) -> None:
+        """Select all hits, then export and list only a chosen part of them."""
+        self.source_path.write_bytes(
+            b"\n".join(
+                _fixture_mail(subject=f"Kijelölős levél {number}", message_id=f"<select-{number}@example.test>")
+                for number in range(1, 4)
+            )
+        )
+        self.source_bytes = self.source_path.read_bytes()
+        self._index_fixture_source()
+        query = ({"field": "subject", "value": "Kijelölős"},)
+
+        every = self.application.detailed_search_ids(query, operator="AND")
+        self.assertEqual((every["total"], len(every["message_ids"])), (3, 3))
+        page = self.application.detailed_search(query, operator="AND", limit=50, offset=0)
+        self.assertEqual(every["message_ids"], [row["message_id"] for row in page["results"]])
+
+        chosen = tuple(every["message_ids"][:2])
+        subjects = {row["message_id"]: row["subject"] for row in page["results"]}
+        narrowed = self.application.detailed_search(
+            query, operator="AND", limit=50, offset=0, message_ids=chosen
+        )
+        self.assertEqual(narrowed["total"], 2)
+        self.assertEqual([row["message_id"] for row in narrowed["results"]], list(chosen))
+
+        csv_bytes, _, _ = self.application.detailed_search_export(
+            query, operator="AND", export_format="csv", message_ids=chosen
+        )
+        csv_text = csv_bytes.decode("utf-8-sig")
+        self.assertEqual(len(csv_text.strip().splitlines()), 3)
+        self.assertNotIn(subjects[every["message_ids"][2]], csv_text)
+        zip_bytes, _, _ = self.application.detailed_search_export(
+            query, operator="AND", export_format="eml_zip", message_ids=chosen
+        )
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
+            self.assertEqual(len([name for name in archive.namelist() if name.endswith(".eml")]), 2)
+
+        # A selected message that is not a hit of the search is never exported.
+        other = ({"field": "subject", "value": "Kijelölős levél 1"},)
+        outside = tuple(
+            message_id for message_id in every["message_ids"] if subjects[message_id] != "Kijelölős levél 1"
+        )
+        with self.assertRaises(ApiError):
+            self.application.detailed_search_export(
+                other, operator="AND", export_format="csv", message_ids=outside
+            )
+
+        http_server = create_server(self.application, port=0)
+        server_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(http_server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(http_server.shutdown)
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", int(http_server.server_address[1]), timeout=3
+        )
+        self.addCleanup(connection.close)
+
+        def post(path: str, payload: dict[str, object]) -> tuple[int, object]:
+            connection.request(
+                "POST", path, body=json.dumps(payload), headers={"Content-Type": "application/json"}
+            )
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+
+        base = {"conditions": list(query), "operator": "AND"}
+        status, ids = post("/api/search/ids", base)
+        self.assertEqual((status, ids["message_ids"]), (200, every["message_ids"]))
+        status, result = post("/api/search", {**base, "message_ids": [chosen[0]]})
+        self.assertEqual((status, result["total"]), (200, 1))
+        for invalid in ([], ["1"], [0], [True], "1"):
+            status, _ = post("/api/search", {**base, "message_ids": invalid})
+            self.assertEqual(status, 400, invalid)
+
     def test_detailed_search_exports_csv_and_verified_eml_zip(self) -> None:
         """Export detailed-search metadata and originals without changing sources."""
         self.application.select_case(str(self.case_directory))

@@ -1234,11 +1234,15 @@ class IndexDatabase:
         limit: int = 100,
         offset: int = 0,
         has_attachment: bool = False,
+        message_ids: tuple[int, ...] | None = None,
+        ids_only: bool = False,
     ) -> tuple[list[sqlite3.Row], int]:
         """Search indexed mail with flat conditions or nested AND/OR groups.
 
         ``has_attachment`` restricts the whole query, combined with AND, to
         messages with at least one attachment, whatever the group operators.
+        ``message_ids`` restricts it, also with AND, to the selected hits.
+        With ``ids_only`` the rows carry just the message ``id``, in result order.
         """
         if operator not in {"AND", "OR"}:
             raise ValueError("Search operator must be AND or OR")
@@ -1415,6 +1419,10 @@ class IndexDatabase:
                 f"({where_clause}) AND EXISTS ("
                 "SELECT 1 FROM attachments WHERE attachments.message_id = messages.id)"
             )
+        if message_ids is not None:
+            # One JSON parameter instead of thousands of placeholders.
+            where_clause = f"({where_clause}) AND messages.id IN (SELECT value FROM json_each(?))"
+            parameters.append(json.dumps([int(message_id) for message_id in message_ids]))
         with self.connection() as connection, _fts_errors():
             total_row = connection.execute(
                 f"SELECT count(*) AS count FROM messages WHERE {where_clause}",
@@ -1428,6 +1436,8 @@ class IndexDatabase:
                 """,
                 [*parameters, limit, offset],
             ).fetchall()
+            if ids_only:
+                return page, int(total_row["count"])
             message_ids = [int(row["id"]) for row in page]
             rows: list[sqlite3.Row] = []
             if message_ids:

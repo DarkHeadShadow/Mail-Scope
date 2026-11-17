@@ -265,6 +265,10 @@ body.booting > .welcome, body.booting > .app-shell { visibility: hidden; }
 .detailed-results-heading { justify-content: space-between; margin-top: 18px; }
 .detailed-results-heading h3 { align-self: center; }
 .label-actions .field { width: 170px; }
+.detailed-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 12px; font-size: 10px; }
+.select-all-results { display: inline-flex; align-items: center; gap: 7px; color: #dbe7df; cursor: pointer; }
+.select-all-results input { accent-color: var(--green); }
+.select-all-results input:disabled + span { color: var(--muted); cursor: default; }
 .detailed-results { margin-top: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .detailed-result-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) minmax(90px, .35fr) auto; align-items: center; gap: 9px; padding: 9px 11px; border-top: 1px solid #202b26; }
 .detailed-result-row:first-child { border-top: 0; }

@@ -29,7 +29,7 @@ EXTENSION_KINDS = {
     "xlsx": {"xlsx"}, "xlsm": {"xlsx"}, "xltx": {"xlsx"},
     "pptx": {"pptx"}, "pptm": {"pptx"},
     "odt": {"odf"}, "ods": {"odf"}, "odp": {"odf"},
-    "doc": {"ole"}, "xls": {"ole"}, "ppt": {"ole"}, "msg": {"msg"},
+    "doc": {"ole"}, "xls": {"ole"}, "ppt": {"ole"}, "msg": {"msg"}, "tnef": {"tnef"},
     "rtf": {"rtf"}, "csv": {"text"}, "eml": {"text", "email"},
     **{extension: {"text", "email"} for extension in TEXT_EXTENSIONS - {"eml"}},
 }
@@ -42,6 +42,7 @@ KIND_LABELS = {
     "docx": "Word-dokumentum (DOCX)", "xlsx": "Excel-munkafüzet (XLSX)",
     "pptx": "PowerPoint-bemutató (PPTX)", "odf": "OpenDocument-fájl",
     "ole": "OLE-fájl (régi Office-dokumentum)", "msg": "Outlook-levél (MSG)",
+    "tnef": "Outlook TNEF-csomag (winmail.dat)",
     "rtf": "RTF-dokumentum",
     "exe": "Windows-program (futtatható)", "elf": "Linux-program (futtatható)",
     "email": "E-mail (RFC 5322)", "text": "Szöveg", "empty": "Üres fájl",
@@ -150,6 +151,9 @@ def detect(data: bytes, filename: str = "", declared_type: str = "") -> TypeInfo
         kind = "gzip"
     elif head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
         kind = "msg" if _MSG_MARKER in data else "ole"
+    elif head.startswith(b"\x78\x9f\x3e\x22"):
+        # Outlook rich-text package: the message body and attachments in one file.
+        kind = "tnef"
     elif head.startswith(b"{\\rtf"):
         kind = "rtf"
     elif head.startswith(b"MZ"):
@@ -197,7 +201,7 @@ def detect(data: bytes, filename: str = "", declared_type: str = "") -> TypeInfo
         view = "xls"
     elif kind in ARCHIVE_KINDS:
         view = "archive"
-    elif kind in {"email", "msg"}:
+    elif kind in {"email", "msg", "tnef"}:
         view = "email"
     elif ext in {"csv", "tsv"} and kind == "text":
         view = "table"
