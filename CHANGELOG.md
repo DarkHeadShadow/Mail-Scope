@@ -4,7 +4,7 @@
 
 Project changes are recorded here.
 
-## [Unreleased]
+## [0.2.0] - 2026-11-17
 
 - Added a **Minden találat kijelölése** checkbox to the detailed search: it selects every hit on all pages (up to 10 000, `POST /api/search/ids`), the selection survives paging and is cleared by a new search. When something is selected, the CSV, EML ZIP and PDF report (and labelling) cover only the selected messages (`message_ids` in `/api/search` and `/api/search/export`); with no selection they cover all hits as before.
 - Added Outlook TNEF (`winmail.dat`, `application/ms-tnef`) support: the attachment is recognized by content, opened like an attached e-mail with its body (compressed RTF unpacked, HTML wrapped in RTF restored, sanitized), files and attached Outlook items as tree children, and its text is searchable (own reader, no new dependency).

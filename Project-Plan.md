@@ -208,6 +208,7 @@ Forrás lehet:
      Mail-Scope akkor is feltelepül. A CI minden feltöltéskor elkészíti, és a kiadáshoz csatolja.
    - [x] Első kiadás: `v0.1.0` (2026-10-27), a GitHub Release-ben a telepítővel és a ZIP-pel.
    - [x] `v0.1.1` (2026-10-29): a telepítő nem írja felül a futó programot; figyelmeztetés, hogy a fül bezárása után a program a háttérben fut.
+   - [x] `v0.2.0` (2026-11-17): „Minden találat kijelölése” a részletes keresésben (a kijelölt levelek exportja és jelentése); winmail.dat (TNEF) csomagok olvasása.
 9. Melléklet-nézegető a 4. képernyő szerint (`docs/feladatok/melleklet-nezegeto.md`):
    formátumonkénti előnézet elkülönített, időkorlátos feldolgozással, opcionális LibreOffice,
    elemzői adatlap, mentés, kapcsolható melléklet-szöveg az FTS-ben.
