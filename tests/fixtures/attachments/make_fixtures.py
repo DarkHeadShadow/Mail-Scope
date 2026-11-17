@@ -396,6 +396,105 @@ def _msg(attachment_pdf: bytes) -> bytes:
     return _cfb(tree)
 
 
+def _tnef(attachment_pdf: bytes) -> bytes:
+    """Build a fictional Outlook TNEF package (winmail.dat): an HTML body wrapped in
+    compressed RTF, an attached PDF and an attached Outlook item."""
+    import struct
+
+    def attribute(level: int, tag: int, value: bytes) -> bytes:
+        return bytes([level]) + struct.pack("<II", tag, len(value)) + value + struct.pack("<H", sum(value) & 0xFFFF)
+
+    def properties(values: list[tuple[int, int, bytes]]) -> bytes:
+        body = struct.pack("<I", len(values))
+        for kind, prop, value in values:
+            body += struct.pack("<HH", kind, prop)
+            if prop >= 0x8000:
+                # A named property (numeric name) sits between the tag and the value.
+                body += bytes([0x11]) * 16 + struct.pack("<II", 0, 0x8501)
+            if kind in (0x000D, 0x001E, 0x001F, 0x0102):
+                body += struct.pack("<II", 1, len(value)) + value + bytes(-len(value) % 4)
+            else:
+                body += value
+        return body
+
+    def unicode(value: str) -> bytes:
+        return value.encode("utf-16-le") + bytes(2)
+
+    def compressed_rtf(rtf: bytes) -> bytes:
+        # Literal-only LZFu: valid, although not actually smaller.
+        body = bytearray()
+        full = len(rtf) - len(rtf) % 8
+        for start in range(0, full, 8):
+            body += bytes(1) + rtf[start:start + 8]
+        tail = rtf[full:]
+        end = ((207 + len(rtf)) % 4096) << 4
+        body += bytes([1 << len(tail)]) + tail + struct.pack(">H", end)
+        return struct.pack("<IIII", len(body) + 12, len(rtf), 0x75465A4C, 0) + bytes(body)
+
+    def package(message: list[tuple[int, int, bytes]], subject: str, attachments: list[bytes]) -> bytes:
+        stream = bytes.fromhex("789f3e22") + struct.pack("<H", 1)
+        stream += attribute(1, 0x00069007, struct.pack("<II", 1250, 0))
+        stream += attribute(1, 0x00018004, subject.encode("cp1250") + bytes(1))
+        stream += attribute(1, 0x00038005, struct.pack("<7H", 2023, 5, 10, 14, 58, 0, 3))
+        stream += attribute(1, 0x00069003, properties(message))
+        return stream + b"".join(attachments)
+
+    filetime = struct.pack("<Q", (1683727080 + 11644473600) * 10_000_000)  # 2023-05-10 13:58 UTC
+    rtf = (
+        r"{\rtf1\ansi\ansicpg1250\fromhtml1 \deff0{\fonttbl{\f0\fswiss Arial;}}"
+        r"{\colortbl\red0\green0\blue0;}"
+        r"{\*\htmltag19 <html>}{\*\htmltag50 <body>}{\*\htmltag64 <p>}"
+        r"\htmlrtf {\htmlrtf0 Kedves B\'e9la!\htmlrtf }\htmlrtf0 {\*\htmltag72 </p>}\htmlrtf \par\htmlrtf0 "
+        r"{\*\htmltag64 <p>}A {\*\htmltag84 <b>}\htmlrtf {\b \htmlrtf0 szerz\u337 ?d\'e9st"
+        r"\htmlrtf }\htmlrtf0 {\*\htmltag92 </b>} a winmail.dat csomagban k\'fcld\'f6m.{\*\htmltag72 </p>}"
+        r"{\*\htmltag0 <script>document.title='HACKED'</script>}"
+        r"{\*\htmltag58 </body>}{\*\htmltag27 </html>}}"
+    ).encode("ascii")
+    inner = package(
+        [
+            (0x001F, 0x0037, unicode("Egyeztetés a helyszíni bejárásról")),
+            (0x001F, 0x0C1A, unicode("Teszt Béla")),
+            (0x001F, 0x5D01, unicode("teszt.bela@pelda.hu")),
+            (0x001E, 0x1000, "Kedves Anna!\r\nA bejárás jövő kedden 10 órakor lesz.\r\nÜdvözlettel: Béla".encode("cp1250") + bytes(1)),
+        ],
+        "Egyeztetés a helyszíni bejárásról",
+        [],
+    )
+    file_attachment = (
+        attribute(2, 0x00069002, bytes(14))
+        + attribute(2, 0x00018010, b"SZERZO~1.PDF" + bytes(1))
+        + attribute(2, 0x0006800F, attachment_pdf)
+        + attribute(2, 0x00069005, properties([
+            (0x0003, 0x3705, struct.pack("<i", 1)),
+            (0x001F, 0x3707, unicode("szerződés-tervezet.pdf")),
+            (0x001F, 0x370E, unicode("application/pdf")),
+        ]))
+    )
+    item_attachment = (
+        attribute(2, 0x00069002, bytes(14))
+        + attribute(2, 0x00069005, properties([
+            (0x0003, 0x3705, struct.pack("<i", 5)),
+            (0x001F, 0x3001, unicode("Egyeztetés a helyszíni bejárásról")),
+            # IID_IMessage, then the attached item's own TNEF stream.
+            (0x000D, 0x3701, bytes.fromhex("0703020000000000c000000000000046") + inner),
+        ]))
+    )
+    return package(
+        [
+            (0x001F, 0x0037, unicode("Szerződéstervezet – winmail.dat csomagban")),
+            (0x001F, 0x0C1A, unicode("Teszt Anna")),
+            (0x001F, 0x5D01, unicode("teszt.anna@pelda.hu")),
+            (0x001F, 0x0E04, unicode("Teszt Béla")),
+            (0x000B, 0x0E1F, struct.pack("<HH", 1, 0)),
+            (0x0003, 0x8000, struct.pack("<i", 7)),
+            (0x0040, 0x0039, filetime),
+            (0x0102, 0x1009, compressed_rtf(rtf)),
+        ],
+        "Szerződéstervezet – winmail.dat csomagban",
+        [file_attachment, item_attachment],
+    )
+
+
 def _eml(attachments: list[tuple[str, str, bytes]]) -> bytes:
     """Build a fictional EML with plain and HTML bodies and the given attachments."""
     from email.message import EmailMessage
@@ -546,6 +645,7 @@ def main() -> None:
         files["sample.xls"] = xls
     files.update(_archives(files["sample.pdf"], files["sample.xlsx"]))
     files["message.msg"] = _msg(files["sample.pdf"])
+    files["winmail.dat"] = _tnef(files["sample.pdf"])
     files["message.eml"] = _eml([
         ("szamlak.zip", "application/zip", files["archive.zip"]),
         ("szerzodes.msg", "application/vnd.ms-outlook", files["message.msg"]),

@@ -16,6 +16,8 @@ const state = {
   detailedResults: [],
   detailedTotal: 0,
   detailedOffset: 0,
+  // Message IDs selected in the detailed search, kept across result pages.
+  detailedSelection: new Set(),
   caseOpen: false,
   route: null,
 };
@@ -713,7 +715,13 @@ function renderDetailedResults() {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.value = String(message.message_id);
+      checkbox.checked = state.detailedSelection.has(Number(message.message_id));
       checkbox.setAttribute("aria-label", `${message.subject || "Levél"} kijelölése`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.detailedSelection.add(Number(message.message_id));
+        else state.detailedSelection.delete(Number(message.message_id));
+        renderDetailedSelection();
+      });
 
       const open = document.createElement("button");
       open.type = "button";
@@ -773,18 +781,75 @@ function renderDetailedResults() {
     `· ${start.toLocaleString("hu-HU")}–${end.toLocaleString("hu-HU")} / ${state.detailedTotal.toLocaleString("hu-HU")}`;
   element("previous-search-page").disabled = state.detailedOffset === 0;
   element("next-search-page").disabled = end >= state.detailedTotal;
+  renderDetailedSelection();
+}
+
+/**
+ * Show how many hits are selected and what the exports will therefore contain.
+ */
+function renderDetailedSelection() {
+  const selected = state.detailedSelection.size;
+  const all = element("select-all-results");
+  all.disabled = state.detailedTotal === 0;
+  all.checked = selected > 0 && selected >= state.detailedTotal;
+  all.indeterminate = selected > 0 && selected < state.detailedTotal;
+  element("detailed-selection-summary").textContent = state.detailedTotal === 0
+    ? ""
+    : selected === 0
+      ? "Nincs kijelölés: az export és a jelentés minden találatot tartalmaz."
+      : `${selected.toLocaleString("hu-HU")} levél kijelölve: az export, a jelentés és a címkézés csak ezeket tartalmazza.`;
+}
+
+/**
+ * Select every hit of the last search on all pages, or clear the selection.
+ */
+async function selectAllDetailedResults(enabled) {
+  const notice = element("detailed-search-notice");
+  try {
+    if (enabled) {
+      const result = await requestJson("/api/search/ids", {
+        method: "POST",
+        body: JSON.stringify(state.detailedSearch),
+      });
+      state.detailedSelection = new Set(result.message_ids);
+      notice.textContent = `Mind a(z) ${result.message_ids.length.toLocaleString("hu-HU")} találat kijelölve.`;
+    } else {
+      state.detailedSelection = new Set();
+      notice.textContent = "A kijelölés törölve.";
+    }
+    notice.classList.remove("error");
+  } catch (error) {
+    notice.textContent = error.message;
+    notice.classList.add("error");
+  }
+  element("detailed-results").querySelectorAll(".detailed-result-row > input").forEach((checkbox) => {
+    checkbox.checked = state.detailedSelection.has(Number(checkbox.value));
+  });
+  renderDetailedSelection();
+}
+
+/**
+ * The last search, narrowed to the selected hits when there is a selection.
+ */
+function selectedDetailedSearch() {
+  if (state.detailedSelection.size === 0) return collectDetailedSearch();
+  return { ...state.detailedSearch, message_ids: [...state.detailedSelection] };
 }
 
 /**
  * Execute the current detailed search and update its result page.
+ *
+ * Paging and refreshing repeat the last search and keep the selection; a new
+ * search starts with nothing selected.
  */
-async function runDetailedSearch(offset = 0) {
-  const query = collectDetailedSearch();
+async function runDetailedSearch(offset = 0, keepSelection = false) {
+  const query = keepSelection && state.detailedSearchRan ? state.detailedSearch : collectDetailedSearch();
   try {
     const result = await requestJson("/api/search", {
       method: "POST",
       body: JSON.stringify({ ...query, limit: 50, offset }),
     });
+    if (!keepSelection) state.detailedSelection = new Set();
     state.detailedSearch = query;
     state.detailedSearchRan = true;
     state.detailedResults = result.results;
@@ -821,8 +886,7 @@ async function refreshSavedSearches() {
  * Apply or remove one label for all selected detailed-search results.
  */
 async function updateSelectedLabels(enabled) {
-  const messageIds = [...element("detailed-results").querySelectorAll("input:checked")]
-    .map((checkbox) => Number(checkbox.value));
+  const messageIds = [...state.detailedSelection];
   const label = element("result-label").value.trim();
   if (!messageIds.length || !label) {
     element("detailed-search-notice").textContent = "Jelöljön ki leveleket és adjon meg egy címkét.";
@@ -830,14 +894,20 @@ async function updateSelectedLabels(enabled) {
     return;
   }
   try {
-    const result = await requestJson("/api/labels", {
-      method: "POST",
-      body: JSON.stringify({ message_ids: messageIds, label, enabled }),
-    });
+    let affected = 0;
+    let result = null;
+    // The label endpoint takes at most 200 messages per request.
+    for (let start = 0; start < messageIds.length; start += 200) {
+      result = await requestJson("/api/labels", {
+        method: "POST",
+        body: JSON.stringify({ message_ids: messageIds.slice(start, start + 200), label, enabled }),
+      });
+      affected += result.occurrences_affected;
+    }
+    await runDetailedSearch(state.detailedOffset, true);
     element("detailed-search-notice").textContent =
-      `${result.label} címke frissítve (${result.occurrences_affected} forráspéldány).`;
+      `${result.label} címke frissítve (${affected} forráspéldány).`;
     element("detailed-search-notice").classList.remove("error");
-    await runDetailedSearch(state.detailedOffset);
     if (state.selectedMessageId) await openMessage(state.selectedMessageId);
   } catch (error) {
     element("detailed-search-notice").textContent = error.message;
@@ -846,14 +916,15 @@ async function updateSelectedLabels(enabled) {
 }
 
 /**
- * Download a CSV or hash-manifested EML ZIP for the active detailed search.
+ * Download a CSV or hash-manifested EML ZIP for the active detailed search:
+ * the selected hits, or every hit when nothing is selected.
  */
 async function exportDetailedSearch(format) {
   try {
     const response = await fetch("/api/search/export", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...collectDetailedSearch(), format }),
+      body: JSON.stringify({ ...selectedDetailedSearch(), format }),
     });
     if (!response.ok) {
       const payload = await response.json();
@@ -868,7 +939,9 @@ async function exportDetailedSearch(format) {
     download.download = filename;
     download.click();
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-    element("detailed-search-notice").textContent = `Export elkészült: ${filename}`;
+    element("detailed-search-notice").textContent = state.detailedSelection.size
+      ? `Export elkészült a kijelölt ${state.detailedSelection.size.toLocaleString("hu-HU")} levélből: ${filename}`
+      : `Export elkészült: ${filename}`;
     element("detailed-search-notice").classList.remove("error");
   } catch (error) {
     element("detailed-search-notice").textContent = error.message;
@@ -880,7 +953,8 @@ async function exportDetailedSearch(format) {
  * Prepare a complete, bounded search report for the browser's print-to-PDF dialog.
  */
 async function printDetailedSearchReport() {
-  const query = collectDetailedSearch();
+  const query = selectedDetailedSearch();
+  const selectedOnly = Array.isArray(query.message_ids);
   const report = element("search-print-report");
   const reportRows = [];
   try {
@@ -889,7 +963,9 @@ async function printDetailedSearchReport() {
       body: JSON.stringify({ ...query, limit: 200, offset: 0 }),
     });
     if (firstPage.total > 2000) {
-      throw new Error("A PDF-jelentés legfeljebb 2000 találatot tartalmazhat; szűkítse a keresést.");
+      throw new Error(selectedOnly
+        ? "A PDF-jelentés legfeljebb 2000 levelet tartalmazhat; jelöljön ki kevesebbet."
+        : "A PDF-jelentés legfeljebb 2000 találatot tartalmazhat; szűkítse a keresést.");
     }
     reportRows.push(...firstPage.results);
     for (let offset = firstPage.results.length; offset < firstPage.total; offset += 200) {
@@ -911,8 +987,11 @@ async function printDetailedSearchReport() {
         .map((condition) => `${condition.field}: ${condition.value}`)
         .join(` ${group.operator} `))
       .join(` ${query.operator} `);
+    const count = selectedOnly
+      ? `Kijelölt találatok: ${firstPage.total.toLocaleString("hu-HU")} (az összes találat: ${state.detailedTotal.toLocaleString("hu-HU")})`
+      : `Találatok: ${firstPage.total.toLocaleString("hu-HU")}`;
     summary.textContent =
-      `Találatok: ${firstPage.total.toLocaleString("hu-HU")} · Feltétel: ${criteria}${query.has_attachment ? " · csak melléklettel" : ""}`;
+      `${count} · Feltétel: ${criteria}${query.has_attachment ? " · csak melléklettel" : ""}`;
     const table = document.createElement("table");
     const head = document.createElement("thead");
     const headerRow = document.createElement("tr");
@@ -2094,6 +2173,8 @@ async function openCase(path, noticeId) {
     state.detailedResults = [];
     state.detailedTotal = 0;
     state.detailedOffset = 0;
+    state.detailedSelection = new Set();
+    state.detailedSearchRan = false;
     renderStatus(status);
     renderDetailedResults();
     await refreshFolders();
@@ -2282,11 +2363,14 @@ element("delete-search-button").addEventListener("click", async () => {
 });
 element("apply-label-button").addEventListener("click", () => updateSelectedLabels(true));
 element("remove-label-button").addEventListener("click", () => updateSelectedLabels(false));
+element("select-all-results").addEventListener("change", (event) => {
+  selectAllDetailedResults(event.target.checked);
+});
 element("previous-search-page").addEventListener("click", () => {
-  runDetailedSearch(Math.max(0, state.detailedOffset - 50));
+  runDetailedSearch(Math.max(0, state.detailedOffset - 50), true);
 });
 element("next-search-page").addEventListener("click", () => {
-  runDetailedSearch(state.detailedOffset + 50);
+  runDetailedSearch(state.detailedOffset + 50, true);
 });
 element("export-search-csv-button").addEventListener("click", () => exportDetailedSearch("csv"));
 element("export-search-eml-button").addEventListener("click", () => exportDetailedSearch("eml_zip"));
@@ -2839,7 +2923,9 @@ function renderEmailPreview(area, entry, preview, query) {
   if (preview.converted) {
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = "Outlook MSG: a fejlécek és a törzs a fájl MAPI-tulajdonságaiból állnak össze.";
+    note.textContent = preview.format === "TNEF"
+      ? "Outlook TNEF-csomag (winmail.dat): a törzs és a mellékletek a csomag MAPI-tulajdonságaiból állnak össze. A csomagban gyakran nincs feladó és címzett; ezek a hordozó levélben vannak."
+      : "Outlook MSG: a fejlécek és a törzs a fájl MAPI-tulajdonságaiból állnak össze.";
     area.append(note);
   }
   if (preview.attachments.length) {

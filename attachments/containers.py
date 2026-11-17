@@ -1,4 +1,4 @@
-"""Expand archives (ZIP, 7z, RAR, gzip) and attached e-mails (EML, MSG).
+"""Expand archives (ZIP, 7z, RAR, gzip) and attached e-mails (EML, MSG, TNEF).
 
 These functions run inside the isolated worker. Nothing is written next to
 the case data except RAR (and AES ZIP) work files for the installed 7-Zip,
@@ -375,14 +375,19 @@ def expand_archive(data: bytes, kind: str, name: str, password: str | None = Non
 # --- Attached e-mails ---------------------------------------------------------
 
 EMAIL_HEADERS = ("From", "To", "Cc", "Bcc", "Reply-To", "Date", "Subject", "Message-ID", "In-Reply-To")
+EMAIL_FORMATS = {"msg": "MSG", "tnef": "TNEF"}
 
 
 def parse_email(data: bytes, kind: str) -> EmailMessage:
-    """Parse EML bytes, or convert MSG bytes, into an EmailMessage."""
+    """Parse EML bytes, or convert MSG or TNEF (winmail.dat) bytes, into an EmailMessage."""
     if kind == "msg":
         from .msg import read_msg
 
         return read_msg(data)
+    if kind == "tnef":
+        from .tnef import read_tnef
+
+        return read_tnef(data)
     return BytesParser(policy=policy.default).parsebytes(data)
 
 
@@ -418,7 +423,7 @@ def _direct_attachments(message: EmailMessage) -> list[tuple[str, str, bytes | N
 
 
 def expand_email(data: bytes, kind: str) -> dict[str, Any]:
-    """Return the attachments of an attached EML or MSG message, in memory."""
+    """Return the attachments of an attached EML, MSG or TNEF message, in memory."""
     message = parse_email(data, kind)
     entries = []
     for filename, content_type, content, error in _direct_attachments(message):
@@ -431,7 +436,7 @@ def expand_email(data: bytes, kind: str) -> dict[str, Any]:
         entries.append(entry)
     return {
         "container": "email",
-        "format": "MSG" if kind == "msg" else "EML",
+        "format": EMAIL_FORMATS.get(kind, "EML"),
         "entries": entries,
         "total_entries": len(entries),
         "stopped": None,
@@ -461,13 +466,13 @@ def render_email(data: bytes, kind: str, filename: str) -> dict[str, Any]:
             document = None
     return {
         "kind": "email",
-        "format": "MSG" if kind == "msg" else "EML",
+        "format": EMAIL_FORMATS.get(kind, "EML"),
         "headers": headers,
         "text": text,
         "truncated": truncated,
         "document": document,
         "attachments": [name for name, *_ in _direct_attachments(message)],
-        "converted": kind == "msg",
+        "converted": kind in EMAIL_FORMATS,
     }
 
 

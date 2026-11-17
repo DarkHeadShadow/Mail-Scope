@@ -160,6 +160,7 @@ class ContainerTests(unittest.TestCase):
         for name, kind, view in (
             ("archive.zip", "zip", "archive"), ("archive.7z", "7z", "archive"),
             ("message.eml", "email", "email"), ("message.msg", "msg", "email"),
+            ("winmail.dat", "tnef", "email"),
         ):
             info = detect(self.fixture(name), name)
             self.assertEqual((info.kind, info.view, info.warnings), (kind, view, ()), name)
@@ -230,6 +231,56 @@ class ContainerTests(unittest.TestCase):
         inner = containers.render_email(attached["data"], "email", attached["name"])
         self.assertEqual(dict(inner["headers"])["From"], "Teszt Béla <teszt.bela@pelda.hu>")
         self.assertIn("A bejárás jövő kedden", inner["text"])
+
+    def test_winmail_dat_reads_body_attachments_and_attached_item(self) -> None:
+        """A TNEF package opens like an attached e-mail, with its files as children."""
+        data = self.fixture("winmail.dat")
+        preview = containers.render_email(data, "tnef", "winmail.dat")
+        headers = dict(preview["headers"])
+        self.assertEqual(headers["From"], "Teszt Anna <teszt.anna@pelda.hu>")
+        self.assertEqual(headers["Subject"], "Szerződéstervezet – winmail.dat csomagban")
+        self.assertEqual(headers["Date"], "Wed, 10 May 2023 13:58:00 +0000")
+        self.assertEqual((preview["format"], preview["converted"]), ("TNEF", True))
+        # The HTML body travels wrapped in compressed RTF; it is restored and sanitized.
+        self.assertIn("<b>szerződést</b>", preview["document"])
+        self.assertNotIn("<script", preview["document"])
+        self.assertIn("A szerződést a winmail.dat csomagban küldöm.", preview["text"])
+        self.assertEqual(preview["attachments"], ["szerződés-tervezet.pdf", "Egyeztetés a helyszíni bejárásról.eml"])
+        children = containers.expand_email(data, "tnef")["entries"]
+        self.assertEqual(children[0]["data"], self.fixture("sample.pdf"))
+        self.assertEqual(children[0]["content_type"], "application/pdf")
+        inner = containers.render_email(children[1]["data"], "email", children[1]["name"])
+        self.assertEqual(dict(inner["headers"])["From"], "Teszt Béla <teszt.bela@pelda.hu>")
+        self.assertIn("A bejárás jövő kedden", inner["text"])
+        # The viewer unpacks it in the isolated worker, with nested paths.
+        entry = describe([Attachment("winmail.dat", "application/ms-tnef", data)])[0]
+        self.assertEqual((entry["container"], entry["real_label"]), ("email", "Outlook TNEF-csomag (winmail.dat)"))
+        expanded = expand(entry, data, None, None)
+        self.assertEqual([child["path"] for child in expanded["entries"]], ["0/0", "0/1"])
+        self.assertEqual(expanded["entries"][0]["view"], "pdf")
+        # A cut-off package keeps what is readable instead of failing.
+        cut = containers.expand_email(data[: len(data) // 2], "tnef")["entries"]
+        self.assertEqual(cut[0]["name"], "SZERZO~1.PDF")
+        self.assertTrue(self.fixture("sample.pdf").startswith(cut[0]["data"]))
+        with self.assertRaises(ValueError):
+            containers.expand_email(b"not a tnef stream", "tnef")
+
+    def test_compressed_rtf_and_rtf_text(self) -> None:
+        """The [MS-OXRTFCP] example streams unpack to their documented RTF."""
+        from attachments.tnef import decompress_rtf, rtf_content
+
+        simple = bytes.fromhex(
+            "2d0000002b0000004c5a4675f1c5c7a703000a007263706731323542320af3"
+            "2068656c090020627705b06c647d0a800fa0"
+        )
+        self.assertEqual(decompress_rtf(simple), b"{\\rtf1\\ansi\\ansicpg1252\\pard hello world}\r\n")
+        crossing = bytes.fromhex("1a0000001c0000004c5a4675e2d44b51410004205758595a0d6e7d010eb0")
+        self.assertEqual(decompress_rtf(crossing), b"{\\rtf1 WXYZWXYZWXYZWXYZWXYZ}")
+        text, is_html = rtf_content(
+            rb"{\rtf1\ansi\ansicpg1250{\fonttbl{\f0 Arial;}}{\*\generator X;}\pard Kedves B\'e9la!\par "
+            rb"\u336 ?r\'fclt \{x\}{\b f\'e9lk\'f6v\'e9r}\par}"
+        )
+        self.assertEqual((text, is_html), ("Kedves Béla!\nŐrült {x}félkövér\n", False))
 
     def test_eml_lists_only_its_own_attachments_and_sanitizes_html(self) -> None:
         preview = containers.render_email(self.fixture("message.eml"), "email", "message.eml")
